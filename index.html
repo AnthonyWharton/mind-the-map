@@ -132,6 +132,15 @@ details > *:not(summary) { margin-top: 8px; }
 /* ===== end css: poi ===== */
 
 /* ===== feature css: gps ===== */
+/* Edge arrow pointing to your position when it's off the map. Sits under the map controls, banner and toast. */
+.gps-edge { position: absolute; z-index: 800; left: 0; top: 0; transform: translate(-50%, -50%); display: flex; align-items: center; gap: 4px; padding: 5px 10px 5px 7px; border: 2px solid #fff; border-radius: 999px; background: #2a7de1; color: #fff; font: 600 13px var(--font-display); font-variant-numeric: tabular-nums; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+.gps-edge[hidden] { display: none; }
+.gps-edge.stale { background: #8a8f99; }
+.gps-edge svg { flex: none; }
+.gps-edge.pulse { animation: gps-pulse .45s ease-in-out 4 alternate; }
+@keyframes gps-pulse { to { transform: translate(-50%, -50%) scale(1.2); } }
+/* Location messages can run to two lines: keep the toast above the map's attribution line so none of it is hidden. */
+#toast { z-index: 1001; }
 /* ===== end css: gps ===== */
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
@@ -413,25 +422,64 @@ details > *:not(summary) { margin-top: 8px; }
   map.on("zoomend", syncLabels); syncLabels();
 
   // ---------- GPS ----------
-  let gps = null, watching = false, centreNext = false, useGpsForPick = false;
+  // gps = last fix { ll, acc, t }. It is live while `watching` (one watch at most, id in watchId). The dot turns grey
+  // after an error; a failed request the user was waiting on stops the watch, and the next request starts a new one.
+  // The map can't scroll beyond maxBounds, so a fix outside it gets an arrow at the map edge and can't be used for
+  // question points (gpsShow, gpsSetPoint, gpsEdge and gpsInPlay are in the gps feature section).
+  // gpsHiccup: the watch reported a passing error since the last fix (the dot greys until the next one).
+  let gps = null, watching = false, watchId = null, centreNext = false, useGpsForPick = false, gpsHiccup = false;
   const gpsLayer = L.layerGroup().addTo(map);
+  const GPS_OPTS = { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 }, GPS_FINDING = "Finding your location…";
+  // A watch stays quiet while you stand still (and after the phone was locked), so an older fix gets a one-off refresh.
+  const gpsFresh = () => watching && gps && !gpsHiccup && Date.now() - gps.t < 20000;
+  const refreshGps = () => navigator.geolocation.getCurrentPosition(onGpsFix, onGpsError, GPS_OPTS);
+  function stopGps() { if (watchId !== null) navigator.geolocation.clearWatch(watchId); watchId = null; watching = false; }
   function startGps(centre) {
-    if (!navigator.geolocation) { toast("This browser can't share your location. Tap the map instead."); return; }
+    if (!navigator.geolocation) { gpsFailed("This browser can't share your location. Tap the map instead."); return; }
     if (centre) centreNext = true;
-    if (watching) { if (gps && centre) { map.setView(gps.ll, Math.max(map.getZoom(), 15)); centreNext = false; } return; }
-    watching = true;
-    navigator.geolocation.watchPosition((p) => {
-      gps = { ll: [p.coords.latitude, p.coords.longitude], acc: p.coords.accuracy };
-      gpsLayer.clearLayers();
-      L.circle(gps.ll, { pane: "gps", radius: gps.acc, color: "#2a7de1", weight: 1, fillColor: "#2a7de1", fillOpacity: 0.1, interactive: false }).addTo(gpsLayer);
-      L.circleMarker(gps.ll, { pane: "gps", radius: 7, color: "#ffffff", weight: 3, fillColor: "#2a7de1", fillOpacity: 1, interactive: false }).addTo(gpsLayer);
-      if (centreNext) { map.setView(gps.ll, Math.max(map.getZoom(), 15)); centreNext = false; }
-      if (useGpsForPick && pick) { useGpsForPick = false; setPoint(gps.ll.slice()); }
-      syncPanels();
-    }, (err) => {
-      watching = false; useGpsForPick = false;
-      toast(err.code === 1 ? "Location is blocked. Allow it for this site in your browser settings." : "Couldn't get your location. Tap the map instead.");
-    }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+    if (!watching) {
+      watching = true;
+      if (centre) toast(GPS_FINDING);
+      watchId = navigator.geolocation.watchPosition(onGpsFix, onGpsError, GPS_OPTS);
+      return;
+    }
+    if (!gps) { if (centre) toast(GPS_FINDING); return; } // still waiting for the first fix
+    if (centreNext) { gpsShow(); if (gpsFresh()) centreNext = false; else refreshGps(); }
+  }
+  function onGpsFix(p) {
+    if (!watching) return; // a late reply after the watch was stopped
+    gps = { ll: [p.coords.latitude, p.coords.longitude], acc: p.coords.accuracy || 0, t: Date.now() }; gpsHiccup = false;
+    drawGps();
+    if (centreNext) { centreNext = false; gpsShow(); }
+    if (useGpsForPick) { useGpsForPick = false; if (pick) gpsSetPoint(); }
+    syncPanels();
+  }
+  function onGpsError(err) {
+    const waiting = centreNext || useGpsForPick;
+    // A passing timeout or "unavailable" (iOS sends these on its own) while we already have a fix: the watch carries
+    // on, so wait for the next one. If nothing comes, gpsFresh() goes false and the next use asks again.
+    if (err.code !== 1 && gps && watching && !waiting) { gpsHiccup = true; drawGps(); return; }
+    stopGps(); gpsHiccup = false;
+    if (err.code === 1) gps = null;
+    drawGps();
+    if (!waiting && err.code !== 1) return;
+    gpsFailed(err.code === 1 ? (window.isSecureContext === false ? "Location only works on the secure (https://) address of this site." : "Location is blocked. Allow it for this site in your browser or phone settings, then try again.")
+      : err.code === 3 ? "Getting your location took too long. Try again, or tap the map instead."
+      : "Couldn't work out where you are. Check location is switched on, then try again.");
+  }
+  function gpsFailed(msg) {
+    centreNext = false;
+    if (useGpsForPick) { useGpsForPick = false; if (pick) $("#b-text").textContent = "No location. Tap the map instead."; }
+    toast(msg);
+  }
+  function drawGps() {
+    gpsLayer.clearLayers();
+    if (gps) {
+      const col = watching && !gpsHiccup ? "#2a7de1" : "#8a8f99", rough = gps.acc > 1000;
+      if (gps.acc > 0 && gpsInPlay(gps.ll)) L.circle(gps.ll, { pane: "gps", radius: gps.acc, color: col, weight: rough ? 2 : 1, opacity: 0.8, dashArray: rough ? "6 6" : null, fillColor: col, fillOpacity: rough ? 0.06 : 0.1, interactive: false }).addTo(gpsLayer);
+      L.circleMarker(gps.ll, { pane: "gps", radius: 7, color: "#ffffff", weight: 3, fillColor: col, fillOpacity: 1, interactive: false }).addTo(gpsLayer);
+    }
+    gpsEdge();
   }
   const Locate = L.Control.extend({
     options: { position: "topright" },
@@ -445,10 +493,19 @@ details > *:not(summary) { margin-top: 8px; }
     }
   });
   new Locate().addTo(map);
-  try { navigator.permissions && navigator.permissions.query({ name: "geolocation" }).then((r) => { if (r.state === "granted") startGps(false); }).catch(() => {}); } catch (e) {}
+  // Only start by itself if location is already allowed: the first permission prompt needs a tap (iOS Safari insists).
+  try {
+    navigator.permissions && navigator.permissions.query({ name: "geolocation" }).then((r) => {
+      if (r.state === "granted") startGps(false);
+      // Blocked mid-way (or at the prompt): handle it like the browser's own "denied" error, which then won't arrive.
+      r.onchange = () => { if (r.state === "denied") onGpsError({ code: 1 }); else if (r.state === "granted" && !watching) startGps(false); };
+    }).catch(() => {});
+  } catch (e) {}
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && watching && gps) refreshGps(); });
   function usePosition() {
-    if (gps) { setPoint(gps.ll.slice()); return; }
-    useGpsForPick = true; $("#b-text").textContent = "Getting your location…"; startGps(false);
+    if (gpsFresh()) { gpsSetPoint(); return; }
+    useGpsForPick = true; $("#b-text").textContent = "Getting your location…";
+    if (watching && gps) refreshGps(); else startGps(false);
   }
 
   // ---------- question types registered by feature sections ----------
@@ -571,10 +628,11 @@ details > *:not(summary) { margin-top: 8px; }
     render();
     const after = stations.filter((s) => s.frac > 0).length;
     lastAdded = c.id;
-    toast(`${describe(c).a}: ${after} station${after === 1 ? "" : "s"} left (${before - after} ruled out)`);
+    toast(`${describe(c).a}: ${after} station${after === 1 ? "" : "s"} left (${before - after} ruled out)`, true);
   }
-  function toast(msg) {
-    $("#t-text").textContent = msg; $("#toast").hidden = false;
+  // undo: show the Undo button (only for the toast that follows add()).
+  function toast(msg, undo) {
+    $("#t-text").textContent = msg; $("#toast").hidden = false; $("#t-undo").hidden = !undo;
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { $("#toast").hidden = true; }, 6000);
   }
   $("#t-undo").onclick = () => { state.cons = state.cons.filter((c) => c.id !== lastAdded); $("#toast").hidden = true; render(); };
@@ -834,6 +892,90 @@ details > *:not(summary) { margin-top: 8px; }
   // ===== end: poi =====
 
   // ===== feature: gps =====
+  // Your position can be anywhere on Earth, but the map is held to central London (maxBounds). So a position
+  // outside that box is described in words ("about 230 km north-west of Zone 1"), shown by an arrow at the map
+  // edge, and never used as a question point. Distances here are great-circle, since the flat proj() is city-scale only.
+  const GPS_ROUGH = 1000, GPS_CHECK = 150; // metres of accuracy: refuse a question point above ROUGH, ask to check above CHECK
+  function gpsInPlay(ll) { return L.latLngBounds(map.options.maxBounds).contains(ll); }
+  function gpsHav(a, b) {
+    const r = Math.PI / 180, dLat = (b[0] - a[0]) * r, dLon = (b[1] - a[1]) * r;
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * r) * Math.cos(b[0] * r) * Math.sin(dLon / 2) ** 2;
+    return 2 * ER * Math.asin(Math.min(1, Math.sqrt(h)));
+  }
+  function gpsCompass(a, b) {
+    const r = Math.PI / 180, y = Math.sin((b[1] - a[1]) * r) * Math.cos(b[0] * r);
+    const x = Math.cos(a[0] * r) * Math.sin(b[0] * r) - Math.sin(a[0] * r) * Math.cos(b[0] * r) * Math.cos((b[1] - a[1]) * r);
+    const deg = (Math.atan2(y, x) / r + 360) % 360;
+    return ["north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west"][Math.round(deg / 45) % 8];
+  }
+  const gpsZoneDist = (ll) => Math.min(...stations.map((s) => gpsHav(ll, [s.lat, s.lon])));
+  const gpsKm = (m) => { const k = m / 1000; return k < 10 ? `${k.toFixed(1)} km` : `${Math.round(k).toLocaleString("en-GB")} km`; };
+  const gpsMi = (m) => { const k = m / 1609.344; return k < 10 ? `${k.toFixed(1)} mi` : `${Math.round(k).toLocaleString("en-GB")} mi`; };
+  function gpsAway(ll) {
+    const d = gpsZoneDist(ll), c = stBounds.getCenter();
+    return `You're about ${gpsKm(d)} (${gpsMi(d)}) ${gpsCompass([c.lat, c.lng], ll)} of Zone 1`;
+  }
+
+  // Locate button (or a tap on the edge arrow) once there is a fix.
+  function gpsShow() {
+    if (!gps) return;
+    if (gpsInPlay(gps.ll)) {
+      // Zoom in as usual, but not so far that a rough fix's circle no longer fits.
+      const fit = gps.acc > 0 ? map.getBoundsZoom(L.latLng(gps.ll).toBounds(gps.acc * 2.2)) : 18;
+      map.setView(gps.ll, Math.min(Math.max(map.getZoom(), 15), fit));
+      if (gps.acc > GPS_ROUGH) toast(`Found you, but only to within about ${fmtD(gps.acc)} so far.`);
+      else if ($("#t-text").textContent === GPS_FINDING) $("#toast").hidden = true;
+    } else {
+      gpsEdge();
+      toast(`${gpsAway(gps.ll)}, off the map. The blue arrow points your way.`);
+      const el = $("#gps-edge");
+      if (el) { el.classList.remove("pulse"); void el.offsetWidth; el.classList.add("pulse"); }
+    }
+  }
+
+  // Put the current fix into the point being picked (radar, thermometer, drawn corner, asking-from), if it makes sense.
+  function gpsSetPoint() {
+    const no = (msg, banner) => { toast(msg); if (pick) $("#b-text").textContent = banner; };
+    if (!gpsInPlay(gps.ll)) return no(`${gpsAway(gps.ll)}, so GPS can't set this point. Tap the map instead.`, "Your location is outside the map. Tap the map to set the point instead.");
+    if (gps.acc > GPS_ROUGH) return no(`GPS is only accurate to about ${fmtD(gps.acc)} right now, too rough to use. Tap the map instead.`, "GPS is too rough right now. Tap the map, or try GPS again.");
+    setPoint(gps.ll.slice());
+    if (gps.acc > GPS_CHECK) toast(`Set from GPS, accurate to about ${fmtD(gps.acc)}. Check it on the map.`);
+  }
+
+  // Arrow at the edge of the map, pointing to your position whenever it's out of view (far away, or just panned off).
+  const gpsEdgeEl = document.createElement("button");
+  gpsEdgeEl.type = "button"; gpsEdgeEl.id = "gps-edge"; gpsEdgeEl.className = "gps-edge"; gpsEdgeEl.hidden = true;
+  gpsEdgeEl.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 2l7.5 18L12 15.6 4.5 20z" fill="currentColor"/></svg><span></span>';
+  gpsEdgeEl.addEventListener("animationend", () => gpsEdgeEl.classList.remove("pulse"));
+  gpsEdgeEl.onclick = () => startGps(true);
+  $("#mapwrap").appendChild(gpsEdgeEl);
+  function gpsEdge() {
+    const el = document.getElementById("gps-edge");
+    if (!el) return;
+    if (!gps) { el.hidden = true; return; }
+    const sz = map.getSize(), p = map.latLngToContainerPoint(gps.ll), pad = 8;
+    if (p.x >= pad && p.y >= pad && p.x <= sz.x - pad && p.y <= sz.y - pad) { el.hidden = true; return; }
+    // Walk from the middle of the map towards the position and stop at a box just inside the edge, which keeps
+    // clear of the banner, the control column on the right and the attribution line (they sit above the arrow).
+    const ban = $("#banner"), ctl = map.getContainer().querySelector(".leaflet-top.leaflet-right");
+    const x0 = 52, x1 = sz.x - 52 - (ctl ? ctl.offsetWidth : 0), y0 = 22 + (ban.hidden ? 0 : ban.offsetTop + ban.offsetHeight), y1 = sz.y - 36;
+    const cx = sz.x / 2, cy = sz.y / 2, dx = p.x - cx, dy = p.y - cy;
+    const t = Math.max(0, Math.min(dx ? (dx > 0 ? x1 - cx : cx - x0) / Math.abs(dx) : Infinity, dy ? (dy > 0 ? y1 - cy : cy - y0) / Math.abs(dy) : Infinity));
+    el.style.left = `${cx + dx * t}px`; el.style.top = `${cy + dy * t}px`;
+    el.querySelector("svg").style.transform = `rotate(${Math.atan2(dy, dx) * 180 / Math.PI + 90}deg)`;
+    const far = !gpsInPlay(gps.ll), c = map.getCenter();
+    const d = far ? gpsZoneDist(gps.ll) : gpsHav([c.lat, c.lng], gps.ll);
+    el.querySelector("span").textContent = far ? gpsKm(d) : fmtD(d);
+    const live = watching && !gpsHiccup;
+    el.classList.toggle("stale", !live);
+    const label = `Your location: ${far ? `${gpsKm(d)} from Zone 1` : `${fmtD(d)} away`}${live ? "" : " (last known)"}`;
+    el.title = label; el.setAttribute("aria-label", label);
+    el.hidden = false;
+  }
+  map.on("move zoom resize viewreset", gpsEdge);
+  new MutationObserver(gpsEdge).observe($("#banner"), { attributes: true, attributeFilter: ["hidden"] });
+  // Test handle for the headless checks (read-only use).
+  window.__gps = { map, get gps() { return gps; }, get watching() { return watching; }, gpsInPlay };
   // ===== end: gps =====
 
   render(); syncPanels(); drawDraft();
