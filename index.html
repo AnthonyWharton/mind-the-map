@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Mind the Map</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H" crossorigin="anonymous">
+<style>
+/* Layout: full-height map with a compact tool sheet docked at the bottom, phone first. */
+:root {
+  --ink: #1b1f2b;
+  --muted: #5b6272;
+  --paper: #ffffff;
+  --land: #ecebe6;
+  --line: #d9d9d3;
+  --accent: #1d3f94;
+  --zone: #d6006f;
+  --yes: #17805a;
+  --no: #b8322c;
+  --font-display: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "Barlow", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--paper); color: var(--ink); font-family: var(--font-body); font-size: 15px; -webkit-tap-highlight-color: transparent; }
+#app { height: 100%; display: grid; grid-template-rows: auto 1fr auto; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--paper); z-index: 1000; }
+.brand { font-family: var(--font-display); font-weight: 700; font-size: 18px; white-space: nowrap; letter-spacing: 0.01em; display: flex; align-items: center; gap: 8px; }
+.roundel { width: 22px; height: 22px; border-radius: 50%; border: 4px solid var(--zone); position: relative; flex: none; }
+.roundel::after { content: ""; position: absolute; left: -7px; right: -7px; top: 50%; height: 5px; margin-top: -2.5px; background: var(--accent); }
+.pill { font-family: var(--font-display); font-weight: 600; font-size: 14px; padding: 4px 10px; border-radius: 999px; background: #fbe3ef; color: #8c0049; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pill.few { background: #e2f3ea; color: #0f5c40; }
+.pill.none { background: #fbe4e2; color: var(--no); }
+#mapwrap { position: relative; min-height: 0; }
+#map { position: absolute; inset: 0; background: var(--land); }
+#banner { position: absolute; left: 10px; right: 10px; top: 10px; z-index: 900; background: var(--ink); color: #fff; border-radius: 12px; padding: 10px 12px; display: flex; align-items: center; gap: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+#banner[hidden] { display: none; }
+#banner span { flex: 1; line-height: 1.3; }
+#banner button { background: #fff; color: var(--ink); }
+#banner button.ghost { background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.5); }
+#toast { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 900; background: var(--ink); color: #fff; padding: 8px 8px 8px 14px; border-radius: 999px; display: flex; gap: 10px; align-items: center; font-size: 14px; max-width: calc(100% - 24px); box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+#toast[hidden] { display: none; }
+#toast button { background: transparent; color: #9db6ff; border: 0; padding: 6px 8px; font-weight: 600; }
+#sheet { border-top: 1px solid var(--line); background: var(--paper); z-index: 1000; display: grid; grid-template-rows: auto 1fr; max-height: 48vh; }
+#sheet.collapsed .panels { display: none; }
+.tabs { display: flex; gap: 4px; padding: 8px 10px 0; overflow-x: auto; scrollbar-width: none; }
+.tabs button { flex: 1 0 auto; white-space: nowrap; background: transparent; border: 0; border-bottom: 3px solid transparent; border-radius: 0; padding: 8px 6px 9px; font-family: var(--font-display); font-weight: 600; font-size: 15px; color: var(--muted); }
+.tabs button.on { color: var(--ink); border-bottom-color: var(--zone); }
+.tabs #collapse { flex: 0 0 auto; color: var(--muted); font-size: 13px; }
+.panels { overflow-y: auto; padding: 12px 14px 14px; border-top: 1px solid var(--line); }
+.panel { display: none; flex-direction: column; gap: 10px; }
+.panel.on { display: flex; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row.two > * { flex: 1; }
+.hint { color: var(--muted); font-size: 14px; margin: 0; line-height: 1.35; }
+button { font: inherit; font-weight: 500; border: 1px solid var(--line); background: #f5f5f1; color: var(--ink); border-radius: 10px; padding: 9px 12px; cursor: pointer; }
+button:disabled { opacity: .4; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.pt { background: #eef2fc; border-color: #c9d4f2; color: var(--accent); font-weight: 600; }
+button.pt.set { background: var(--accent); color: #fff; border-color: var(--accent); }
+.answers { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.answers button { padding: 12px 10px; font-weight: 600; color: #fff; border: 0; }
+.answers .yes { background: var(--yes); }
+.answers .no { background: var(--no); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips button { padding: 6px 10px; border-radius: 999px; font-size: 14px; font-variant-numeric: tabular-nums; }
+.chips button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+input, select, textarea { font: inherit; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: #fff; color: var(--ink); min-width: 0; }
+input[type="number"] { width: 90px; }
+#d-note, #s-q { flex: 1; }
+textarea { width: 100%; min-height: 64px; font-size: 13px; }
+label { color: var(--muted); font-size: 14px; }
+.check { display: flex; align-items: center; gap: 6px; }
+ul.list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+ul.list li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #efefea; }
+ul.list li:last-child { border-bottom: 0; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--zone); flex: none; }
+.dot.off { background: #b9bcc4; }
+.grow { flex: 1; min-width: 0; }
+.name { font-weight: 600; }
+.sub { color: var(--muted); font-size: 13px; }
+.off-text .name { color: var(--muted); text-decoration: line-through; text-decoration-color: rgba(0,0,0,.3); }
+li button { padding: 6px 10px; font-size: 14px; }
+.tag { font-size: 12px; font-weight: 600; padding: 2px 7px; border-radius: 6px; }
+.tag.yes { background: #e2f3ea; color: #0f5c40; }
+.tag.no { background: #fbe4e2; color: var(--no); }
+button.danger { color: var(--no); }
+details summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+details > *:not(summary) { margin-top: 8px; }
+.empty { color: var(--muted); font-size: 14px; padding: 6px 0; }
+/* Station labels: only once zoomed in enough to read them */
+.leaflet-tooltip.stn { background: rgba(255,255,255,.88); border: 0; box-shadow: none; padding: 0 4px; font: 600 11px var(--font-body); color: var(--ink); border-radius: 4px; display: none; }
+.leaflet-tooltip.stn::before { display: none; }
+.leaflet-tooltip.stn.gone { color: #8a8f99; }
+.labels .leaflet-tooltip.stn { display: block; }
+.locate { width: 34px; height: 34px; padding: 0; display: grid; place-items: center; background: #fff; color: var(--accent); border: 2px solid rgba(0,0,0,.2); border-radius: 4px; background-clip: padding-box; }
+#banner #b-gps { background: #2a7de1; color: #fff; border: 0; }
+.ptlabel { background: var(--accent); color: #fff; font: 700 12px var(--font-display); width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+.leaflet-popup-content { margin: 12px 14px; font-family: var(--font-body); font-size: 14px; }
+.pop h3 { margin: 0 0 2px; font-family: var(--font-display); font-size: 17px; }
+.pop .sub { margin-bottom: 8px; }
+.pop .acts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.pop .acts button { padding: 7px 8px; font-size: 13px; }
+.leaflet-container { font-family: var(--font-body); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand"><span class="roundel" aria-hidden="true"></span>Mind the Map</div>
+    <div id="count" class="pill">Loading…</div>
+  </header>
+  <div id="mapwrap">
+    <div id="map" aria-label="Map of Zone 1 tube stations"></div>
+    <div id="banner" hidden><span id="b-text"></span><button id="b-gps" type="button">Use GPS</button><button id="b-done" type="button">Done</button><button id="b-cancel" class="ghost" type="button">Cancel</button></div>
+    <div id="toast" hidden><span id="t-text"></span><button id="t-undo" type="button">Undo</button></div>
+  </div>
+  <section id="sheet">
+    <nav class="tabs" role="tablist">
+      <button type="button" data-tab="radar" class="on">Radar</button>
+      <button type="button" data-tab="thermo">Thermo</button>
+      <button type="button" data-tab="draw">Draw</button>
+      <button type="button" data-tab="stations">Stations</button>
+      <button type="button" data-tab="log">Log <span id="logn"></span></button>
+      <button type="button" id="collapse" aria-expanded="true">Hide ▾</button>
+    </nav>
+    <div class="panels">
+      <div class="panel on" id="p-radar">
+        <div class="row"><button type="button" class="pt" id="r-gps">Use my GPS</button><button type="button" class="pt" id="r-pick">Pick on map</button></div>
+        <p class="hint" id="r-where">Set where you are asking from.</p>
+        <div class="chips" id="r-chips">
+          <button type="button" data-m="250">250 m</button>
+          <button type="button" data-m="500">500 m</button>
+          <button type="button" data-m="1000" class="on">1 km</button>
+          <button type="button" data-m="2000">2 km</button>
+          <button type="button" data-m="5000">5 km</button>
+          <button type="button" data-m="402.336">¼ mi</button>
+          <button type="button" data-m="804.672">½ mi</button>
+          <button type="button" data-m="1609.344">1 mi</button>
+          <button type="button" data-m="4828.032">3 mi</button>
+        </div>
+        <div class="row"><label for="r-custom">Other</label><input id="r-custom" type="number" inputmode="decimal" min="0" step="any" placeholder="1.5"><select id="r-unit" aria-label="Unit"><option value="1000">km</option><option value="1609.344">mi</option><option value="1">m</option></select></div>
+        <div class="answers"><button type="button" class="yes" id="r-yes" disabled>Yes, within</button><button type="button" class="no" id="r-no" disabled>No, outside</button></div>
+      </div>
+      <div class="panel" id="p-thermo">
+        <div class="row two"><button type="button" class="pt" id="t-a">Set start (A)</button><button type="button" class="pt" id="t-b">Set end (B)</button></div>
+        <p class="hint" id="t-info">Set A with GPS when you start moving, travel, then set B with GPS where you stop. The line halfway between them splits the map.</p>
+        <div class="answers"><button type="button" class="yes" id="t-hot" disabled>Hotter (nearer B)</button><button type="button" class="no" id="t-cold" disabled>Colder (nearer A)</button></div>
+      </div>
+      <div class="panel" id="p-draw">
+        <p class="hint">Outline an area by tapping its corners on the map. Use it for matching, measuring, photo or any answer that splits the map.</p>
+        <div class="row"><button type="button" class="pt" id="d-start">Start outline</button><button type="button" id="d-undo" disabled>Undo corner</button><button type="button" id="d-clear" disabled>Clear</button></div>
+        <div class="row"><input id="d-note" type="text" placeholder="Note, e.g. same nearest museum" aria-label="Note for this area"></div>
+        <div class="answers"><button type="button" class="yes" id="d-in" disabled>Hider is inside</button><button type="button" class="no" id="d-out" disabled>Hider is outside</button></div>
+      </div>
+      <div class="panel" id="p-stations">
+        <div class="row"><input id="s-q" type="search" placeholder="Find a station" aria-label="Find a station"><label class="check" for="s-boundary"><input type="checkbox" id="s-boundary" checked> Zone 1/2 stations</label></div>
+        <ul class="list" id="s-list"></ul>
+      </div>
+      <div class="panel" id="p-log">
+        <ul class="list" id="log"></ul>
+        <div class="row"><button type="button" id="l-undo">Undo last</button><button type="button" id="l-reset" class="danger">Reset game</button></div>
+        <details>
+          <summary>Share with your team</summary>
+          <p class="hint">Copy the game code and send it to a teammate. They paste it here and tap Load to get the same map.</p>
+          <div class="row"><button type="button" id="l-copy">Copy game code</button><button type="button" id="l-load">Load code</button></div>
+          <textarea id="l-code" aria-label="Game code" placeholder="Paste a game code here"></textarea>
+          <p class="hint" id="l-msg"></p>
+        </details>
+      </div>
+    </div>
+  </section>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js" integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/polygon-clipping@0.15.7/dist/polygon-clipping.umd.min.js" integrity="sha384-2gzcIyrtB96QDjrxsFcJ1O461CWiXJ8fiHgIkJLwTgy4WTktHXTOXt4dviXz9Y5Q" crossorigin="anonymous"></script>
+<script>
+(async function () {
+  const $ = (s) => document.querySelector(s);
+  const pc = window.polygonClipping;
+  const STORE = "z1seek.v1";
+  const ZONE_R = 500;
+
+  // ---------- geometry: local flat projection in metres (fine at city scale) ----------
+  const ER = 6371008.8, LAT0 = 51.507, LON0 = -0.12, KX = Math.cos(LAT0 * Math.PI / 180);
+  const proj = (lat, lon) => [(lon - LON0) * Math.PI / 180 * ER * KX, (lat - LAT0) * Math.PI / 180 * ER];
+  const unproj = (x, y) => [y / ER * 180 / Math.PI + LAT0, x / (ER * KX) * 180 / Math.PI + LON0];
+  const dist = (a, b) => { const p = proj(a[0], a[1]), q = proj(b[0], b[1]); return Math.hypot(p[0] - q[0], p[1] - q[1]); };
+  function circleRing(cx, cy, r, n) {
+    const ring = [];
+    for (let i = 0; i < n; i++) { const a = 2 * Math.PI * i / n; ring.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]); }
+    ring.push(ring[0].slice());
+    return ring;
+  }
+  const ringArea = (r) => { let s = 0; for (let i = 0; i < r.length - 1; i++) s += r[i][0] * r[i + 1][1] - r[i + 1][0] * r[i][1]; return s / 2; };
+  const multiArea = (m) => Math.abs(m.reduce((t, poly) => t + poly.reduce((u, ring) => u + ringArea(ring), 0), 0));
+  const toLL = (m) => m.map((poly) => poly.map((ring) => ring.map(([x, y]) => unproj(x, y))));
+  const fmtD = (m) => m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(m < 10000 ? 2 : 1).replace(/\.?0+$/, "")} km`;
+  const fmtDual = (m) => `${fmtD(m)} (${(m / 1609.344).toFixed(2).replace(/\.?0+$/, "")} mi)`;
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  // ---------- data ----------
+  let D;
+  // Station and line data: TfL open data compiled by Oliver O'Brien, pinned to one commit.
+  const SRC = "https://raw.githubusercontent.com/oobrien/vis/ae963bb19c97fd00dbb4053f7bfd904fca26c504/tubecreature/data/";
+  const COLORS = { "Bakerloo": "B36305", "Central": "E32017", "Circle": "FFD300", "District": "00782A", "Hammersmith & City": "F3A9BB", "Jubilee": "A0A5A9", "Metropolitan": "9B0056", "Northern": "000000", "Piccadilly": "003688", "Victoria": "0098D4", "Waterloo & City": "95CDBA" };
+  // The source predates the Northern line extension's rezoning.
+  const ZONE_FIX = { "Nine Elms": "1", "Battersea Power Station": "1", "Kennington": "1/2" };
+  const current = (l) => !l.closed && (l.opened || 0) <= 2026;
+  try {
+    const [sj, lj] = await Promise.all(["tfl_stations.json", "tfl_lines.json"].map((f) => fetch(SRC + f).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })));
+    const picked = new Map();
+    for (const f of sj.features) {
+      const p = f.properties;
+      const zone = ZONE_FIX[p.name] || String(p.zone || "");
+      const tl = p.lines.filter((l) => COLORS[l.name] && current(l)).map((l) => l.name);
+      if (!tl.length || !zone.split("/").includes("1")) continue;
+      let name = p.name.split("St. ").join("St ");
+      if (name === "Edgware Road") name = tl.length === 1 && tl[0] === "Bakerloo" ? "Edgware Road (Bakerloo)" : "Edgware Road (Circle/District/H&C)";
+      const [lon, lat] = f.geometry.coordinates;
+      if (picked.has(name)) { const s0 = picked.get(name); tl.forEach((l) => { if (!s0.l.includes(l)) s0.l.push(l); }); continue; }
+      picked.set(name, { n: name, z: zone, l: tl, lat, lon });
+    }
+    const st = [...picked.values()].sort((a, b) => (a.n < b.n ? -1 : a.n > b.n ? 1 : 0));
+    const bbox = [Math.min(...st.map((s) => s.lat)) - 0.03, Math.min(...st.map((s) => s.lon)) - 0.045, Math.max(...st.map((s) => s.lat)) + 0.03, Math.max(...st.map((s) => s.lon)) + 0.045];
+    const inBox = ([x, y]) => y >= bbox[0] && y <= bbox[2] && x >= bbox[1] && x <= bbox[3];
+    const lines = [];
+    for (const f of lj.features) {
+      const c = f.geometry.coordinates;
+      if (!c.some(inBox)) continue;
+      for (const l of f.properties.lines) if (COLORS[l.name] && current(l)) lines.push({ l: l.name, c: c.map(([x, y]) => [y, x]) });
+    }
+    const order = { "Circle": 0, "Hammersmith & City": 1 };
+    lines.sort((a, b) => (order[a.l] ?? 2) - (order[b.l] ?? 2));
+    D = { bbox, colors: COLORS, stations: st, lines };
+  } catch (e) { $("#count").textContent = "Map data didn't load. Refresh to try again."; return; }
+  const stations = D.stations.map((s) => {
+    const xy = proj(s.lat, s.lon);
+    const ring = circleRing(xy[0], xy[1], ZONE_R, 64);
+    return { ...s, xy, ring, base: Math.abs(ringArea(ring)), rem: [], frac: 1 };
+  });
+  const byName = Object.fromEntries(stations.map((s) => [s.n, s]));
+  function nearest(ll) {
+    let best = null, bd = Infinity;
+    for (const s of stations) { const d = dist(ll, [s.lat, s.lon]); if (d < bd) { bd = d; best = s; } }
+    return { s: best, d: bd };
+  }
+  const placeName = (ll) => { const n = nearest(ll); return n.d < 60 ? n.s.n : `near ${n.s.n}`; };
+
+  // ---------- state ----------
+  let state = { cons: [], boundary: true };
+  try { const saved = JSON.parse(localStorage.getItem(STORE)); if (saved && Array.isArray(saved.cons)) state = { boundary: true, ...saved }; } catch (e) {}
+  const save = () => { try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (e) {} };
+  const draft = { radarC: null, radarM: 1000, ta: null, tb: null, pts: [] };
+  let pick = null; // 'radar' | 'ta' | 'tb' | 'draw'
+
+  // ---------- map ----------
+  const [b0, b1, b2, b3] = D.bbox;
+  const map = L.map("map", { preferCanvas: true, zoomControl: false, minZoom: 11, maxZoom: 18, maxBounds: [[b0 - 0.05, b1 - 0.08], [b2 + 0.05, b3 + 0.08]], attributionControl: true });
+  map.attributionControl.setPrefix(false).addAttribution("Stations &amp; lines: TfL open data via Oliver O'Brien");
+  L.control.zoom({ position: "topright" }).addTo(map);
+  const tiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+    subdomains: "abcd", maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+  }).addTo(map);
+  const simple = L.layerGroup();
+  L.control.layers({ "Street map": tiles, "Simple map (Thames and lines)": simple }, null, { position: "topright" }).addTo(map);
+  const panes = { base: 300, lines: 380, mask: 400, zones: 410, cons: 420, stns: 450, draft: 460, gps: 470 };
+  for (const [n, z] of Object.entries(panes)) { map.createPane(n).style.zIndex = z; }
+  const stBounds = L.latLngBounds(stations.map((s) => [s.lat, s.lon]));
+  map.fitBounds(stBounds, { padding: [10, 10] });
+
+  // Simple basemap: the Thames is only fetched if someone switches to the simple map.
+  let thamesLoaded = false;
+  map.on("baselayerchange", async (e) => {
+    if (e.layer !== simple || thamesLoaded) return;
+    thamesLoaded = true;
+    try {
+      const tj = await (await fetch(SRC + "river_thames_simp.json")).json();
+      const [a, b, c, d] = D.bbox;
+      tj.features.forEach((f) => {
+        const ring = f.geometry.coordinates[0];
+        if (!ring.some(([x, y]) => y >= a && y <= c && x >= b && x <= d)) return;
+        L.polygon(f.geometry.coordinates.map((r) => r.map(([x, y]) => [y, x])), { pane: "base", stroke: false, fillColor: "#a9cbe8", fillOpacity: 1, interactive: false }).addTo(simple);
+      });
+    } catch (err) { thamesLoaded = false; }
+  });
+  const W = { "Circle": 8, "Hammersmith & City": 5.5 };
+  D.lines.forEach((l) => L.polyline(l.c, { pane: "lines", color: "#" + D.colors[l.l], weight: W[l.l] || 3, opacity: 0.9, interactive: false }).addTo(map));
+
+  const outlineLayer = L.layerGroup().addTo(map);
+  stations.forEach((s) => { s.outline = L.polygon(s.ring.map(([x, y]) => unproj(x, y)), { pane: "zones", color: "#1b1f2b", weight: 0.6, opacity: 0.25, fill: false, interactive: false }).addTo(outlineLayer); });
+  const maskLayer = L.layerGroup().addTo(map);
+  const zoneLayer = L.layerGroup().addTo(map);
+  const consLayer = L.layerGroup().addTo(map);
+  const draftLayer = L.layerGroup().addTo(map);
+
+  stations.forEach((s) => {
+    s.marker = L.circleMarker([s.lat, s.lon], { pane: "stns", radius: 5.5, weight: 2, color: "#1b1f2b", fillColor: "#ffffff", fillOpacity: 1, bubblingMouseEvents: false })
+      .bindTooltip(s.n, { permanent: true, direction: "right", offset: [6, 0], className: "stn" })
+      .addTo(map);
+    s.marker.on("click", () => onStationTap(s));
+  });
+  const syncLabels = () => map.getContainer().classList.toggle("labels", map.getZoom() >= 13);
+  map.on("zoomend", syncLabels); syncLabels();
+
+  // ---------- GPS ----------
+  let gps = null, watching = false, centreNext = false, useGpsForPick = false;
+  const gpsLayer = L.layerGroup().addTo(map);
+  function startGps(centre) {
+    if (!navigator.geolocation) { toast("This browser can't share your location. Tap the map instead."); return; }
+    if (centre) centreNext = true;
+    if (watching) { if (gps && centre) { map.setView(gps.ll, Math.max(map.getZoom(), 15)); centreNext = false; } return; }
+    watching = true;
+    navigator.geolocation.watchPosition((p) => {
+      gps = { ll: [p.coords.latitude, p.coords.longitude], acc: p.coords.accuracy };
+      gpsLayer.clearLayers();
+      L.circle(gps.ll, { pane: "gps", radius: gps.acc, color: "#2a7de1", weight: 1, fillColor: "#2a7de1", fillOpacity: 0.1, interactive: false }).addTo(gpsLayer);
+      L.circleMarker(gps.ll, { pane: "gps", radius: 7, color: "#ffffff", weight: 3, fillColor: "#2a7de1", fillOpacity: 1, interactive: false }).addTo(gpsLayer);
+      if (centreNext) { map.setView(gps.ll, Math.max(map.getZoom(), 15)); centreNext = false; }
+      if (useGpsForPick && pick) { useGpsForPick = false; setPoint(gps.ll.slice()); }
+      syncPanels();
+    }, (err) => {
+      watching = false; useGpsForPick = false;
+      toast(err.code === 1 ? "Location is blocked. Allow it for this site in your browser settings." : "Couldn't get your location. Tap the map instead.");
+    }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+  }
+  const Locate = L.Control.extend({
+    options: { position: "topright" },
+    onAdd() {
+      const b = L.DomUtil.create("button", "locate");
+      b.type = "button"; b.title = "Show my location"; b.setAttribute("aria-label", "Show my location");
+      b.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"/><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4" stroke="currentColor" stroke-width="2"/></svg>';
+      L.DomEvent.disableClickPropagation(b);
+      L.DomEvent.on(b, "click", () => startGps(true));
+      return b;
+    }
+  });
+  new Locate().addTo(map);
+  try { navigator.permissions && navigator.permissions.query({ name: "geolocation" }).then((r) => { if (r.state === "granted") startGps(false); }).catch(() => {}); } catch (e) {}
+  function usePosition() {
+    if (gps) { setPoint(gps.ll.slice()); return; }
+    useGpsForPick = true; $("#b-text").textContent = "Getting your location…"; startGps(false);
+  }
+
+  // ---------- constraints ----------
+  function regionFor(c) {
+    if (c.type === "radar") { const [x, y] = proj(c.c[0], c.c[1]); return [circleRing(x, y, c.r, 128)]; }
+    if (c.type === "area") { const ring = c.pts.map((p) => proj(p[0], p[1])); ring.push(ring[0].slice()); return [ring]; }
+    if (c.type === "thermo") {
+      const A = proj(c.a[0], c.a[1]), B = proj(c.b[0], c.b[1]);
+      let nx = B[0] - A[0], ny = B[1] - A[1]; const d = Math.hypot(nx, ny); nx /= d; ny /= d;
+      if (c.ans === "colder") { nx = -nx; ny = -ny; }
+      const mx = (A[0] + B[0]) / 2, my = (A[1] + B[1]) / 2, tx = -ny, ty = nx, Lm = 80000;
+      return [[[mx + tx * Lm, my + ty * Lm], [mx + tx * Lm + nx * Lm, my + ty * Lm + ny * Lm], [mx - tx * Lm + nx * Lm, my - ty * Lm + ny * Lm], [mx - tx * Lm, my - ty * Lm], [mx + tx * Lm, my + ty * Lm]]];
+    }
+    return null;
+  }
+  const keepsInside = (c) => c.type === "thermo" || c.ans === "in";
+  function describe(c) {
+    if (c.type === "radar") return { t: `Radar ${fmtD(c.r)} from ${placeName(c.c)}`, a: c.ans === "in" ? "Within" : "Outside", ok: c.ans === "in" };
+    if (c.type === "thermo") return { t: `Thermometer ${fmtD(dist(c.a, c.b))}, ${placeName(c.a)} → ${placeName(c.b)}`, a: c.ans === "hotter" ? "Hotter" : "Colder", ok: c.ans === "hotter" };
+    if (c.type === "area") return { t: c.note ? `Area: ${c.note}` : `Drawn area (${c.pts.length} corners)`, a: c.ans === "in" ? "Inside" : "Outside", ok: c.ans === "in" };
+    if (c.type === "station") return { t: `${c.name} ruled out by hand`, a: "Out", ok: false };
+    return { t: "?", a: "", ok: false };
+  }
+
+  function compute() {
+    const active = state.cons.filter((c) => c.on);
+    const manual = new Set(active.filter((c) => c.type === "station").map((c) => c.name));
+    const regions = active.filter((c) => c.type !== "station").map((c) => ({ g: regionFor(c), keep: keepsInside(c) }));
+    for (const s of stations) {
+      s.why = null;
+      if (!state.boundary && s.z !== "1") { s.rem = []; s.frac = 0; s.why = "Zone 1/2 hidden"; continue; }
+      if (manual.has(s.n)) { s.rem = []; s.frac = 0; s.why = "Ruled out by hand"; continue; }
+      let m = [[s.ring]];
+      for (const r of regions) {
+        try { m = r.keep ? pc.intersection(m, r.g) : pc.difference(m, r.g); } catch (e) { console.warn("clip failed", e); }
+        if (!m.length) break;
+      }
+      const a = m.length ? multiArea(m) : 0;
+      if (a < 1) { s.rem = []; s.frac = 0; s.why = "Eliminated"; } else { s.rem = m; s.frac = a / s.base; }
+    }
+  }
+
+  function render() {
+    compute();
+    const alive = stations.filter((s) => s.frac > 0);
+    // count pill
+    const pill = $("#count");
+    const total = stations.filter((s) => state.boundary || s.z === "1").length;
+    pill.textContent = alive.length === 0 ? "None left: check log" : `${alive.length} of ${total} left`;
+    pill.className = "pill" + (alive.length === 0 ? " none" : alive.length <= 5 ? " few" : "");
+    // remaining zones + mask
+    zoneLayer.clearLayers(); maskLayer.clearLayers();
+    const anyCons = state.cons.some((c) => c.on) || !state.boundary;
+    alive.forEach((s) => L.polygon(toLL(s.rem), { pane: "zones", color: "#d6006f", weight: 1.6, fillColor: "#d6006f", fillOpacity: anyCons ? 0.2 : 0.07, interactive: false }).addTo(zoneLayer));
+    if (anyCons) {
+      const [p, q] = [proj(b0 - 0.2, b1 - 0.3), proj(b2 + 0.2, b3 + 0.3)];
+      const big = [[[p[0], p[1]], [q[0], p[1]], [q[0], q[1]], [p[0], q[1]], [p[0], p[1]]]];
+      let mask = [big];
+      try { if (alive.length) mask = pc.difference(big, pc.union(...alive.map((s) => s.rem))); } catch (e) { console.warn(e); }
+      L.polygon(toLL(mask), { pane: "mask", stroke: false, fillColor: "#2a2f3a", fillOpacity: 0.38, interactive: false }).addTo(maskLayer);
+    }
+    // station markers
+    stations.forEach((s) => {
+      const on = s.frac > 0;
+      s.marker.setStyle({ fillColor: on ? "#ffffff" : "#c3c6cd", color: on ? "#1b1f2b" : "#80858f", radius: on ? 5.5 : 4 });
+      const tt = s.marker.getTooltip(); if (tt && tt.getElement()) tt.getElement().classList.toggle("gone", !on);
+      s.outline.setStyle({ opacity: on ? 0.25 : 0.12 });
+    });
+    // constraint outlines
+    consLayer.clearLayers();
+    state.cons.filter((c) => c.on).forEach((c) => {
+      const st = { pane: "cons", color: "#1b1f2b", weight: 1.5, opacity: 0.6, dashArray: "5 5", fill: false, interactive: false };
+      if (c.type === "radar") L.circle(c.c, { ...st, radius: c.r }).addTo(consLayer);
+      if (c.type === "area") L.polygon(c.pts, st).addTo(consLayer);
+      if (c.type === "thermo") L.polyline(bisector(c.a, c.b, 12000), st).addTo(consLayer);
+    });
+    renderStations(); renderLog(); save();
+  }
+
+  function bisector(a, b, half) {
+    const A = proj(a[0], a[1]), B = proj(b[0], b[1]);
+    const mx = (A[0] + B[0]) / 2, my = (A[1] + B[1]) / 2;
+    let tx = -(B[1] - A[1]), ty = B[0] - A[0]; const d = Math.hypot(tx, ty) || 1; tx /= d; ty /= d;
+    return [unproj(mx + tx * half, my + ty * half), unproj(mx - tx * half, my - ty * half)];
+  }
+
+  // ---------- adding / removing ----------
+  let lastAdded = null, toastTimer = null;
+  function add(c) {
+    const before = stations.filter((s) => s.frac > 0).length;
+    c.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    c.on = true;
+    state.cons.push(c);
+    render();
+    const after = stations.filter((s) => s.frac > 0).length;
+    lastAdded = c.id;
+    toast(`${describe(c).a}: ${after} station${after === 1 ? "" : "s"} left (${before - after} ruled out)`);
+  }
+  function toast(msg) {
+    $("#t-text").textContent = msg; $("#toast").hidden = false;
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { $("#toast").hidden = true; }, 6000);
+  }
+  $("#t-undo").onclick = () => { state.cons = state.cons.filter((c) => c.id !== lastAdded); $("#toast").hidden = true; render(); };
+
+  // ---------- picking points ----------
+  function startPick(kind) {
+    pick = kind;
+    const msg = { radar: "Use GPS, or tap a station or any spot on the map.", ta: "Start point (A): use GPS or tap the map.", tb: "End point (B): use GPS or tap the map.", draw: "Tap the map to add corners (GPS adds where you are). Tap Done when finished." }[kind];
+    $("#b-text").textContent = msg;
+    $("#b-done").hidden = kind !== "draw";
+    $("#banner").hidden = false;
+    map.closePopup();
+  }
+  function endPick() { pick = null; useGpsForPick = false; $("#banner").hidden = true; }
+  $("#b-cancel").onclick = () => { if (pick === "draw") draft.pts = []; endPick(); drawDraft(); syncPanels(); };
+  $("#b-done").onclick = () => { endPick(); drawDraft(); syncPanels(); };
+  $("#b-gps").onclick = () => usePosition();
+
+  function setPoint(ll) {
+    if (pick === "radar") { draft.radarC = ll; endPick(); }
+    else if (pick === "ta") { draft.ta = ll; endPick(); }
+    else if (pick === "tb") { draft.tb = ll; endPick(); }
+    else if (pick === "draw") { draft.pts.push(ll); $("#b-text").textContent = `${draft.pts.length} corner${draft.pts.length === 1 ? "" : "s"}. Keep tapping, then tap Done.`; }
+    drawDraft(); syncPanels();
+  }
+  map.on("click", (e) => { if (pick) setPoint([e.latlng.lat, e.latlng.lng]); });
+
+  function onStationTap(s) {
+    if (pick) { setPoint([s.lat, s.lon]); return; }
+    const manual = state.cons.find((c) => c.on && c.type === "station" && c.name === s.n);
+    const status = s.frac > 0 ? `${Math.round(s.frac * 100)}% of its zone still possible` : (s.why || "Eliminated");
+    const html = `<div class="pop"><h3>${esc(s.n)}</h3><div class="sub">Zone ${esc(s.z)} · ${esc(s.l.join(", "))}<br>${esc(status)}</div>
+      <div class="acts">
+        <button type="button" data-act="radar">Radar from here</button>
+        ${manual ? `<button type="button" data-act="restore">Restore station</button>` : `<button type="button" data-act="out" ${s.frac > 0 ? "" : "disabled"}>Rule out station</button>`}
+        <button type="button" data-act="ta">Thermometer A</button>
+        <button type="button" data-act="tb">Thermometer B</button>
+      </div></div>`;
+    const pop = L.popup({ maxWidth: 260 }).setLatLng([s.lat, s.lon]).setContent(html).openOn(map);
+    const el = pop.getElement();
+    el.querySelectorAll("button[data-act]").forEach((b) => b.addEventListener("click", () => {
+      const act = b.dataset.act; map.closePopup();
+      if (act === "radar") { draft.radarC = [s.lat, s.lon]; showTab("radar"); }
+      if (act === "ta") { draft.ta = [s.lat, s.lon]; showTab("thermo"); }
+      if (act === "tb") { draft.tb = [s.lat, s.lon]; showTab("thermo"); }
+      if (act === "out") add({ type: "station", name: s.n, ans: "out" });
+      if (act === "restore") { state.cons = state.cons.filter((c) => !(c.type === "station" && c.name === s.n)); render(); }
+      drawDraft(); syncPanels();
+    }));
+  }
+
+  // ---------- drafts on the map ----------
+  const ptIcon = (t) => L.divIcon({ className: "", html: `<div class="ptlabel">${t}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] });
+  function drawDraft() {
+    draftLayer.clearLayers();
+    const tab = currentTab;
+    if (tab === "radar" && draft.radarC) {
+      L.circle(draft.radarC, { pane: "draft", radius: radarMetres(), color: "#1d3f94", weight: 2, dashArray: "6 6", fillColor: "#1d3f94", fillOpacity: 0.06, interactive: false }).addTo(draftLayer);
+      L.marker(draft.radarC, { pane: "draft", icon: ptIcon("●"), interactive: false }).addTo(draftLayer);
+    }
+    if (tab === "thermo") {
+      if (draft.ta) L.marker(draft.ta, { pane: "draft", icon: ptIcon("A"), interactive: false }).addTo(draftLayer);
+      if (draft.tb) L.marker(draft.tb, { pane: "draft", icon: ptIcon("B"), interactive: false }).addTo(draftLayer);
+      if (draft.ta && draft.tb) {
+        L.polyline([draft.ta, draft.tb], { pane: "draft", color: "#1d3f94", weight: 2, interactive: false }).addTo(draftLayer);
+        if (dist(draft.ta, draft.tb) > 1) L.polyline(bisector(draft.ta, draft.tb, 12000), { pane: "draft", color: "#1d3f94", weight: 2.5, dashArray: "8 6", interactive: false }).addTo(draftLayer);
+      }
+    }
+    if (tab === "draw" && draft.pts.length) {
+      const opts = { pane: "draft", color: "#1d3f94", weight: 2.5, fillColor: "#1d3f94", fillOpacity: 0.1, interactive: false };
+      (draft.pts.length >= 3 ? L.polygon(draft.pts, opts) : L.polyline(draft.pts, opts)).addTo(draftLayer);
+      draft.pts.forEach((p) => L.circleMarker(p, { pane: "draft", radius: 4, color: "#1d3f94", fillColor: "#fff", fillOpacity: 1, weight: 2, interactive: false }).addTo(draftLayer));
+    }
+  }
+
+  // ---------- panels ----------
+  let currentTab = "radar";
+  function showTab(t) {
+    currentTab = t;
+    document.querySelectorAll(".tabs button[data-tab]").forEach((b) => b.classList.toggle("on", b.dataset.tab === t));
+    document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("on", p.id === "p-" + t));
+    $("#sheet").classList.remove("collapsed"); $("#collapse").textContent = "Hide ▾"; $("#collapse").setAttribute("aria-expanded", "true");
+    if (pick && !((t === "radar" && pick === "radar") || (t === "thermo" && (pick === "ta" || pick === "tb")) || (t === "draw" && pick === "draw"))) endPick();
+    drawDraft(); syncPanels();
+    setTimeout(() => map.invalidateSize(), 0);
+  }
+  document.querySelectorAll(".tabs button[data-tab]").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
+  $("#collapse").onclick = () => {
+    const c = $("#sheet").classList.toggle("collapsed");
+    $("#collapse").textContent = c ? "Show ▴" : "Hide ▾"; $("#collapse").setAttribute("aria-expanded", String(!c));
+    setTimeout(() => map.invalidateSize(), 0);
+  };
+
+  function radarMetres() {
+    const v = parseFloat($("#r-custom").value);
+    if (v > 0) return v * parseFloat($("#r-unit").value);
+    return draft.radarM;
+  }
+  $("#r-chips").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-m]"); if (!b) return;
+    draft.radarM = parseFloat(b.dataset.m); $("#r-custom").value = "";
+    drawDraft(); syncPanels();
+  });
+  $("#r-custom").addEventListener("input", () => { drawDraft(); syncPanels(); });
+  $("#r-unit").addEventListener("change", () => { drawDraft(); syncPanels(); });
+  $("#r-pick").onclick = () => startPick("radar");
+  $("#r-gps").onclick = () => { startPick("radar"); usePosition(); };
+  $("#r-yes").onclick = () => { add({ type: "radar", c: draft.radarC, r: radarMetres(), ans: "in" }); draft.radarC = null; drawDraft(); syncPanels(); };
+  $("#r-no").onclick = () => { add({ type: "radar", c: draft.radarC, r: radarMetres(), ans: "out" }); draft.radarC = null; drawDraft(); syncPanels(); };
+
+  $("#t-a").onclick = () => startPick("ta");
+  $("#t-b").onclick = () => startPick("tb");
+  const thermoAdd = (ans) => { add({ type: "thermo", a: draft.ta, b: draft.tb, ans }); draft.ta = draft.tb = null; drawDraft(); syncPanels(); };
+  $("#t-hot").onclick = () => thermoAdd("hotter");
+  $("#t-cold").onclick = () => thermoAdd("colder");
+
+  $("#d-start").onclick = () => { startPick("draw"); drawDraft(); };
+  $("#d-undo").onclick = () => { draft.pts.pop(); drawDraft(); syncPanels(); };
+  $("#d-clear").onclick = () => { draft.pts = []; drawDraft(); syncPanels(); };
+  const areaAdd = (ans) => { add({ type: "area", pts: draft.pts.slice(), ans, note: $("#d-note").value.trim() }); draft.pts = []; $("#d-note").value = ""; if (pick === "draw") endPick(); drawDraft(); syncPanels(); };
+  $("#d-in").onclick = () => areaAdd("in");
+  $("#d-out").onclick = () => areaAdd("out");
+
+  function syncPanels() {
+    // radar
+    const m = radarMetres();
+    document.querySelectorAll("#r-chips button").forEach((b) => b.classList.toggle("on", !$("#r-custom").value && Math.abs(parseFloat(b.dataset.m) - draft.radarM) < 0.01));
+    $("#r-where").textContent = draft.radarC ? `Asking from ${placeName(draft.radarC)} · radius ${fmtDual(m)}` : "Set where you are asking from.";
+    const rOk = !!draft.radarC && m > 0;
+    $("#r-yes").disabled = $("#r-no").disabled = !rOk;
+    $("#r-yes").textContent = `Yes, within ${fmtD(m)}`; $("#r-no").textContent = `No, outside ${fmtD(m)}`;
+    // thermo
+    $("#t-a").classList.toggle("set", !!draft.ta); $("#t-b").classList.toggle("set", !!draft.tb);
+    $("#t-a").textContent = draft.ta ? `A: ${placeName(draft.ta)}` : "Set start (A)";
+    $("#t-b").textContent = draft.tb ? `B: ${placeName(draft.tb)}` : "Set end (B)";
+    const tOk = draft.ta && draft.tb && dist(draft.ta, draft.tb) > 1;
+    $("#t-hot").disabled = $("#t-cold").disabled = !tOk;
+    $("#t-info").textContent = tOk ? `You moved ${fmtDual(dist(draft.ta, draft.tb))}. The dashed line splits the map halfway between A and B.` : "Set A with GPS when you start moving, travel, then set B with GPS where you stop.";
+    // draw
+    $("#d-start").classList.toggle("set", pick === "draw");
+    $("#d-start").textContent = pick === "draw" ? "Adding corners…" : draft.pts.length ? "Add more corners" : "Start outline";
+    $("#d-undo").disabled = $("#d-clear").disabled = !draft.pts.length;
+    $("#d-in").disabled = $("#d-out").disabled = draft.pts.length < 3;
+  }
+
+  // stations list
+  $("#s-q").addEventListener("input", renderStations);
+  $("#s-boundary").checked = state.boundary;
+  $("#s-boundary").addEventListener("change", (e) => { state.boundary = e.target.checked; render(); });
+  function renderStations() {
+    const q = $("#s-q").value.trim().toLowerCase();
+    const list = stations.filter((s) => !q || s.n.toLowerCase().includes(q)).sort((a, b) => (b.frac > 0) - (a.frac > 0) || a.n.localeCompare(b.n));
+    const ul = $("#s-list"); ul.innerHTML = "";
+    if (!list.length) { ul.innerHTML = `<li class="empty">No station matches “${esc(q)}”.</li>`; return; }
+    for (const s of list) {
+      const on = s.frac > 0;
+      const manual = state.cons.some((c) => c.on && c.type === "station" && c.name === s.n);
+      const li = document.createElement("li");
+      if (!on) li.className = "off-text";
+      li.innerHTML = `<span class="dot ${on ? "" : "off"}"></span><div class="grow"><div class="name">${esc(s.n)}</div><div class="sub">${on ? `${Math.round(s.frac * 100)}% of zone possible` : esc(s.why || "Eliminated")} · ${esc(s.l.join(", "))}</div></div>`;
+      const btn = document.createElement("button"); btn.type = "button";
+      if (manual) { btn.textContent = "Restore"; btn.onclick = () => { state.cons = state.cons.filter((c) => !(c.type === "station" && c.name === s.n)); render(); }; }
+      else { btn.textContent = "Rule out"; btn.disabled = !on; btn.onclick = () => add({ type: "station", name: s.n, ans: "out" }); }
+      li.querySelector(".grow").onclick = () => { map.setView([s.lat, s.lon], Math.max(map.getZoom(), 15)); };
+      li.appendChild(btn); ul.appendChild(li);
+    }
+  }
+
+  // log
+  function renderLog() {
+    const ul = $("#log"); ul.innerHTML = "";
+    $("#logn").textContent = state.cons.length ? `(${state.cons.length})` : "";
+    if (!state.cons.length) { ul.innerHTML = `<li class="empty">No answers yet. Each radar, thermometer, drawn area or ruled-out station shows up here, and you can switch it off or delete it.</li>`; return; }
+    state.cons.forEach((c, i) => {
+      const d = describe(c);
+      const li = document.createElement("li");
+      if (!c.on) li.className = "off-text";
+      li.innerHTML = `<div class="grow"><div class="name">${i + 1}. ${esc(d.t)}</div><div class="sub"><span class="tag ${d.ok ? "yes" : "no"}">${esc(d.a)}</span>${c.on ? "" : " · switched off"}</div></div>`;
+      const tog = document.createElement("button"); tog.type = "button"; tog.textContent = c.on ? "Switch off" : "Switch on";
+      tog.onclick = () => { c.on = !c.on; render(); };
+      const del = document.createElement("button"); del.type = "button"; del.textContent = "Delete"; del.className = "danger";
+      del.onclick = () => { state.cons = state.cons.filter((x) => x !== c); render(); };
+      li.append(tog, del); ul.appendChild(li);
+    });
+  }
+  $("#l-undo").onclick = () => { state.cons.pop(); render(); };
+  let resetArmed = false;
+  $("#l-reset").onclick = () => {
+    if (!resetArmed) { resetArmed = true; $("#l-reset").textContent = "Tap again to clear everything"; setTimeout(() => { resetArmed = false; $("#l-reset").textContent = "Reset game"; }, 4000); return; }
+    resetArmed = false; $("#l-reset").textContent = "Reset game";
+    state = { cons: [], boundary: true }; $("#s-boundary").checked = true; draft.radarC = draft.ta = draft.tb = null; draft.pts = [];
+    drawDraft(); syncPanels(); render();
+  };
+  const encode = () => btoa(unescape(encodeURIComponent(JSON.stringify(state))));
+  $("#l-copy").onclick = async () => {
+    const code = encode(); $("#l-code").value = code;
+    try { await navigator.clipboard.writeText(code); $("#l-msg").textContent = "Copied. Send it to your teammate."; }
+    catch (e) { $("#l-code").select(); $("#l-msg").textContent = "Couldn't copy automatically. The code is in the box: select it and copy."; }
+  };
+  $("#l-load").onclick = () => {
+    try {
+      const s = JSON.parse(decodeURIComponent(escape(atob($("#l-code").value.trim()))));
+      if (!s || !Array.isArray(s.cons)) throw new Error("bad");
+      state = { boundary: true, ...s }; $("#s-boundary").checked = state.boundary; render();
+      $("#l-msg").textContent = `Loaded ${state.cons.length} answer${state.cons.length === 1 ? "" : "s"}.`;
+    } catch (e) { $("#l-msg").textContent = "That code didn't work. Check you copied all of it."; }
+  };
+
+  render(); syncPanels(); drawDraft();
+  window.__app = { state, stations, add, render, draft, setPoint, startPick, getState: () => state };
+})();
+</script>
+</body>
+</html>
