@@ -11,7 +11,7 @@ It shows every Zone 1 tube station with its 500 m hiding zone, and gives seekers
 
 Everything ruled out is shaded grey, the header counts the stations left, and every answer can be switched off, deleted or undone. Answers are saved in the browser, and a game code lets teammates share the same map.
 
-Live at **https://anthonywharton.github.io/mind-the-map/** (served over HTTPS, which phones need before they share GPS).
+Live at **https://mindthemap.wharton.dev/** (served over HTTPS, which phones need before they share GPS).
 
 ## How it works
 
