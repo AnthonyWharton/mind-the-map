@@ -620,7 +620,8 @@ details > *:not(summary) { margin-top: 8px; }
       const [p, q] = [proj(b0 - 0.2, b1 - 0.3), proj(b2 + 0.2, b3 + 0.3)];
       const big = [[[p[0], p[1]], [q[0], p[1]], [q[0], q[1]], [p[0], q[1]], [p[0], p[1]]]];
       let mask = [big];
-      try { if (alive.length) mask = pc.difference(big, pc.union(...alive.map((s) => s.rem))); } catch (e) { console.warn(e); }
+      try { if (alive.length) mask = pc.difference(big, pc.union(...alive.map((s) => s.rem))); }
+      catch (e) { for (const s of alive) { try { mask = pc.difference(mask, s.rem); } catch (e2) { console.warn(e2); } } } // the one-shot union can trip over near-collinear shared edges
       L.polygon(toLL(mask), { pane: "mask", stroke: false, fillColor: "#2a2f3a", fillOpacity: 0.38, interactive: false }).addTo(maskLayer);
     }
     // station markers
@@ -1904,6 +1905,274 @@ details > *:not(summary) { margin-top: 8px; }
   // ===== end: admin =====
 
   // ===== feature: measure-thames =====
+  // Measuring: "Compared to me, are you closer to or further from a body of water?"
+  // Distance to water = distance to the nearest water edge, 0 on the water. "Within d of water" is traced
+  // from a distance field on a 10 m grid (built once per water set, so any d is then quick) with marching
+  // squares. That stays robust where unioning thousands of overlapping buffer capsules makes
+  // polygon-clipping throw. Answers keep a margin (EPS) in the hider's favour that covers the grid, the
+  // river simplification and the contour simplification, so borderline places are never ruled out.
+  // Optional extra water: data/measure-thames-water.json, lakes, ponds, canals and docks around Zone 1,
+  // baked from OpenStreetMap via Overpass (© OpenStreetMap contributors, ODbL 1.0; see the file's
+  // "source" and "note" fields). The Thames itself comes from loadThames().
+  {
+    const T = "measure-water", H = 10, SIMP = 5, TAU = 2, EPS = Math.ceil(SIMP + H * Math.SQRT2 + TAU); // 22 m
+    const LABELS = { thames: "the Thames", all: "the Thames, lakes, canals or docks" };
+    const sets = {}; // set -> { raw: { polys: [{ p, n }], lines: [{ l, n }] }, F, cache, p, failAt }
+    let useAll = false;
+    map.attributionControl.addAttribution('&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors');
+
+    // Douglas–Peucker on an open polyline, and on a closed ring (split at the vertex farthest from the first).
+    const dpLine = (pts, tol) => {
+      if (pts.length < 3) return pts.slice();
+      const keep = new Uint8Array(pts.length); keep[0] = keep[pts.length - 1] = 1;
+      const st = [[0, pts.length - 1]];
+      while (st.length) {
+        const [i, j] = st.pop(), [ax, ay] = pts[i], [bx, by] = pts[j], dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
+        let md = 0, mi = -1;
+        for (let k = i + 1; k < j; k++) { const [px, py] = pts[k], dd = L ? Math.abs(dx * (ay - py) - dy * (ax - px)) / L : Math.hypot(px - ax, py - ay); if (dd > md) { md = dd; mi = k; } }
+        if (md > tol) { keep[mi] = 1; st.push([i, mi], [mi, j]); }
+      }
+      return pts.filter((_, k) => keep[k]);
+    };
+    const dpRing = (r, tol) => {
+      const pts = r.slice(0, -1); if (pts.length < 4) return r;
+      let fi = 0, fd = -1;
+      for (let k = 1; k < pts.length; k++) { const d = Math.hypot(pts[k][0] - pts[0][0], pts[k][1] - pts[0][1]); if (d > fd) { fd = d; fi = k; } }
+      const out = dpLine(pts.slice(0, fi + 1), tol).concat(dpLine(pts.slice(fi).concat([pts[0]]), tol).slice(1));
+      return out.length >= 4 ? out : r;
+    };
+
+    // ---- data ----
+    const S = (set) => sets[set] || (sets[set] = { cache: new Map() });
+    const load = (set) => {
+      const s = S(set);
+      if (s.raw) return Promise.resolve(true);
+      if (s.p) return s.p;
+      if (s.failAt && Date.now() - s.failAt < 10000) return Promise.resolve(false);
+      s.p = Promise.all([loadThames(), set === "all" ? loadJSON("data/measure-thames-water.json") : null]).then(([th, ex]) => {
+        const polys = th.polys.map((p) => ({ p, n: "the Thames" })), lines = [];
+        for (const f of ex ? ex.features : []) {
+          const g = f.geometry, n = f.properties.name || ({ canal: "a canal", dock: "a dock", lake: "a lake" }[f.properties.kind] || "a pond");
+          if (g.type === "Polygon") polys.push({ p: g.coordinates.map((r) => r.map(([x, y]) => proj(y, x))), n });
+          else if (g.type === "LineString") lines.push({ l: g.coordinates.map(([x, y]) => proj(y, x)), n });
+        }
+        s.raw = { polys, lines }; s.p = null;
+        return true;
+      }).catch(() => { s.p = null; s.failAt = Date.now(); toast("Couldn't load the water data. Check your connection."); return false; });
+      return s.p;
+    };
+    // After data arrives: redraw everything that may have been waiting for it.
+    const refresh = () => { render(); drawDraft(); syncPanels(); };
+    const need = (set) => { const s = S(set); if (!s.raw && !s.p) load(set).then((ok) => { if (ok) setTimeout(refresh, 0); }); };
+
+    // The grid covers every hiding zone plus 1 km, so the preview shows a little context too.
+    const wantWin = () => {
+      let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
+      for (const st of stations) for (const [x, y] of st.ring) { if (x < a) a = x; if (y < b) b = y; if (x > c) c = x; if (y > d) d = y; }
+      return [a, b, c, d];
+    };
+
+    // ---- distance field: exact distance from each grid node to the nearest water edge (0 inside water) ----
+    const buildField = (raw, win) => {
+      const x0 = win[0], y0 = win[1], nx = Math.ceil((win[2] - win[0]) / H) + 1, ny = Math.ceil((win[3] - win[1]) / H) + 1;
+      const polys = raw.polys.map(({ p }) => p.map((r) => dpRing(r, SIMP)));
+      const seg = [];
+      const addLine = (l) => { for (let i = 1; i < l.length; i++) if (l[i][0] !== l[i - 1][0] || l[i][1] !== l[i - 1][1]) seg.push(l[i - 1][0], l[i - 1][1], l[i][0], l[i][1]); };
+      polys.forEach((p) => p.forEach(addLine)); raw.lines.forEach(({ l }) => addLine(l));
+      const G = new Float64Array(seg), ns = G.length / 4, f = new Float32Array(nx * ny);
+      const sd2 = (px, py, k) => { const ax = G[k], ay = G[k + 1], dx = G[k + 2] - ax, dy = G[k + 3] - ay, L2 = dx * dx + dy * dy; let t = L2 ? ((px - ax) * dx + (py - ay) * dy) / L2 : 0; t = t < 0 ? 0 : t > 1 ? 1 : t; const ex = px - ax - t * dx, ey = py - ay - t * dy; return ex * ex + ey * ey; };
+      // Blocks of B×B nodes: a node's nearest segment is within (block centre's nearest distance + block diagonal) of the centre.
+      const B = 16, diag = B * H * Math.SQRT2, cand = new Int32Array(ns), dc = new Float64Array(ns);
+      for (let bj = 0; bj < ny; bj += B) for (let bi = 0; bi < nx; bi += B) {
+        const cx = x0 + (bi + (B - 1) / 2) * H, cy = y0 + (bj + (B - 1) / 2) * H;
+        let m = Infinity;
+        for (let s = 0; s < ns; s++) { const d = sd2(cx, cy, s * 4); dc[s] = d; if (d < m) m = d; }
+        const lim = (Math.sqrt(m) + diag) ** 2; let nc = 0;
+        for (let s = 0; s < ns; s++) if (dc[s] <= lim) cand[nc++] = s * 4;
+        const jm = Math.min(ny, bj + B), im = Math.min(nx, bi + B);
+        for (let j = bj; j < jm; j++) {
+          const py = y0 + j * H;
+          for (let i = bi; i < im; i++) { const px = x0 + i * H; let b = Infinity; for (let c = 0; c < nc; c++) { const d = sd2(px, py, cand[c]); if (d < b) b = d; } f[j * nx + i] = Math.sqrt(b); }
+        }
+      }
+      // Nodes on the water: scanline fill, even–odd within each polygon.
+      for (const p of polys) {
+        let ya = Infinity, yb = -Infinity; for (const [, y] of p[0]) { if (y < ya) ya = y; if (y > yb) yb = y; }
+        const j0 = Math.max(0, Math.ceil((ya - y0) / H)), j1 = Math.min(ny - 1, Math.floor((yb - y0) / H));
+        for (let j = j0; j <= j1; j++) {
+          const y = y0 + j * H, xs = [];
+          for (const r of p) for (let k = 1; k < r.length; k++) { const [ax, ay] = r[k - 1], [bx, by] = r[k]; if ((ay > y) !== (by > y)) xs.push(ax + (y - ay) / (by - ay) * (bx - ax)); }
+          xs.sort((a, b) => a - b);
+          for (let k = 0; k + 1 < xs.length; k += 2) { const i0 = Math.max(0, Math.ceil((xs[k] - x0) / H)), i1 = Math.min(nx - 1, Math.floor((xs[k + 1] - x0) / H)); for (let i = i0; i <= i1; i++) f[j * nx + i] = 0; }
+        }
+      }
+      return { x0, y0, nx, ny, f, win };
+    };
+    const field = (set) => {
+      const s = S(set);
+      if (!s.raw) { need(set); return null; }
+      const w = wantWin();
+      if (!s.F || w[0] < s.F.win[0] + 500 || w[1] < s.F.win[1] + 500 || w[2] > s.F.win[2] - 500 || w[3] > s.F.win[3] - 500) {
+        if (s.F) for (const c of state.cons) if (c.type === T && c.set === set) regionCache.delete(c.id); // zones moved: old regions may be cut short
+        s.F = buildField(s.raw, [w[0] - 1000, w[1] - 1000, w[2] + 1000, w[3] + 1000]); s.cache.clear();
+      }
+      return s.F;
+    };
+
+    // ---- marching squares: the area where the field is <= t, as a multipolygon (outer rings CCW, holes CW) ----
+    const trace = (F, t) => {
+      const { x0, y0, nx, ny, f } = F, W = nx + 2;
+      const val = (i, j) => (i < 0 || j < 0 || i >= nx || j >= ny) ? Infinity : f[j * nx + i]; // outside the grid counts as dry land
+      const pt = new Map(), next = new Map();
+      // Crossing between node a and its neighbour b, keyed by the edge so neighbouring cells share it.
+      const cross = (ai, aj, bi, bj) => {
+        const id = aj === bj ? 2 * ((aj + 1) * W + Math.min(ai, bi) + 1) : 2 * ((Math.min(aj, bj) + 1) * W + ai + 1) + 1;
+        if (!pt.has(id)) {
+          const fa = val(ai, aj), fb = val(bi, bj);
+          let u = fa === Infinity || fb === Infinity ? 0.5 : (t - fa) / (fb - fa); u = u < 0.001 ? 0.001 : u > 0.999 ? 0.999 : u;
+          pt.set(id, [x0 + (ai + (bi - ai) * u) * H, y0 + (aj + (bj - aj) * u) * H]);
+        }
+        return id;
+      };
+      const ci = [0, 1, 1, 0], cj = [0, 0, 1, 1], inn = [0, 0, 0, 0], ev = [];
+      for (let j = -1; j < ny; j++) for (let i = -1; i < nx; i++) {
+        let n = 0;
+        for (let k = 0; k < 4; k++) { inn[k] = val(i + ci[k], j + cj[k]) <= t ? 1 : 0; n += inn[k]; }
+        if (n === 0 || n === 4) continue;
+        ev.length = 0;
+        // Corners in anticlockwise order; a segment runs from where the walk leaves the area to where it re-enters, keeping the area on its left.
+        for (let k = 0; k < 4; k++) { const k2 = (k + 1) % 4; if (inn[k] !== inn[k2]) ev.push(cross(i + ci[k], j + cj[k], i + ci[k2], j + cj[k2]), inn[k]); }
+        if (ev.length === 4) { if (ev[1]) next.set(ev[0], ev[2]); else next.set(ev[2], ev[0]); }
+        else { // saddle: join through the centre if the centre is inside
+          const mid = (val(i, j) + val(i + 1, j) + val(i + 1, j + 1) + val(i, j + 1)) / 4 <= t;
+          for (let k = 0; k < 4; k++) if (ev[2 * k + 1]) next.set(ev[2 * k], ev[2 * ((k + (mid ? 1 : 3)) % 4)]);
+        }
+      }
+      const outers = [], holes = [];
+      for (const start of [...next.keys()]) {
+        if (!next.has(start)) continue;
+        let ring = [], id = start;
+        while (next.has(id)) { ring.push(pt.get(id)); const n2 = next.get(id); next.delete(id); id = n2; }
+        if (ring.length < 3) continue;
+        ring.push(ring[0].slice()); ring = dpRing(ring, TAU);
+        if (ring.length < 4) continue;
+        const a = ringArea(ring);
+        let bb = [Infinity, Infinity, -Infinity, -Infinity];
+        for (const [x, y] of ring) bb = [Math.min(bb[0], x), Math.min(bb[1], y), Math.max(bb[2], x), Math.max(bb[3], y)];
+        (a > 0 ? outers : holes).push({ ring, a: Math.abs(a), bb });
+      }
+      outers.sort((p, q) => p.a - q.a);
+      const polys = outers.map((o) => [o.ring]);
+      for (const h of holes) {
+        const [x, y] = h.ring[0];
+        const k = outers.findIndex((o) => o.a > h.a && x >= o.bb[0] && x <= o.bb[2] && y >= o.bb[1] && y <= o.bb[3] && pointInRing([x, y], o.ring));
+        if (k >= 0) polys[k].push(h.ring);
+      }
+      return polys;
+    };
+    const within = (set, t) => {
+      const F = field(set); if (!F) return null;
+      const s = S(set), key = t.toFixed(1);
+      if (!s.cache.has(key)) { if (s.cache.size > 24) s.cache.clear(); s.cache.set(key, trace(F, t)); }
+      return s.cache.get(key);
+    };
+    // Outline as lat/lng polylines, leaving out the artificial edge where the grid ends.
+    const outlineLL = (F, mp) => {
+      const [a, b, c, d] = F.win, m = 2 * H, out = [];
+      const edge = ([x, y]) => x < a + m || x > c - m || y < b + m || y > d - m;
+      for (const poly of mp) for (const ring of poly) {
+        let cur = [];
+        for (const p of ring) { if (edge(p)) { if (cur.length > 1) out.push(cur); cur = []; } else cur.push(unproj(p[0], p[1])); }
+        if (cur.length > 1) out.push(cur);
+      }
+      return out;
+    };
+
+    // Exact distance from a projected point to the nearest water edge (unsimplified data), with the nearest point.
+    const nearestWater = (set, xy) => {
+      const raw = S(set).raw; if (!raw) return null;
+      for (const { p, n } of raw.polys) if (pointInRing(xy, p[0]) && !p.slice(1).some((h) => pointInRing(xy, h))) return { d: 0, pt: xy, n };
+      let best = { d: Infinity };
+      const scan = (l, n) => {
+        for (let i = 1; i < l.length; i++) {
+          const [ax, ay] = l[i - 1], [bx, by] = l[i], dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+          let u = L2 ? ((xy[0] - ax) * dx + (xy[1] - ay) * dy) / L2 : 0; u = Math.max(0, Math.min(1, u));
+          const q = [ax + u * dx, ay + u * dy], d = Math.hypot(xy[0] - q[0], xy[1] - q[1]);
+          if (d < best.d) best = { d, pt: q, n };
+        }
+      };
+      raw.polys.forEach(({ p, n }) => p.forEach((r) => scan(r, n))); raw.lines.forEach(({ l, n }) => scan(l, n));
+      return best;
+    };
+
+    QTYPES[T] = {
+      // Closer: keep everything within d (+ margin) of water. Further: remove everything within d (- margin).
+      // Parts that touch no hiding zone can't change anything, so they're left out to keep clipping quick.
+      region(c) {
+        const t = c.ans === "closer" ? c.d + EPS : c.d - EPS;
+        if (t <= 0) return field(c.set) ? [] : null;
+        const mp = within(c.set, t); if (!mp) return null;
+        const zb = stations.map((s) => { const xs = s.ring.map((p) => p[0]), ys = s.ring.map((p) => p[1]); return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]; });
+        return mp.filter((poly) => {
+          let a = Infinity, b = Infinity, cc = -Infinity, d = -Infinity;
+          for (const [x, y] of poly[0]) { if (x < a) a = x; if (y < b) b = y; if (x > cc) cc = x; if (y > d) d = y; }
+          return zb.some((z) => a <= z[2] && cc >= z[0] && b <= z[3] && d >= z[1]);
+        });
+      },
+      keeps: (c) => c.ans === "closer",
+      describe: (c) => ({ t: `Water: ${c.ans} than ${fmtD(c.d)} to ${LABELS[c.set] || LABELS.thames} (from ${placeName(c.c)})`, a: c.ans === "closer" ? "Closer" : "Further", ok: c.ans === "closer" }),
+      outline(c, st, layer) {
+        const mp = c.d > 0 ? within(c.set, c.d) : null; if (!mp) return;
+        L.polyline(outlineLL(S(c.set).F, mp), st).addTo(layer);
+      },
+    };
+
+    // ---- UI ----
+    const el = addSubject("measure", "water", "Body of water (Thames)");
+    el.innerHTML = `<label class="check" for="mw-all"><input type="checkbox" id="mw-all"> Include lakes, canals and docks</label>
+      <p class="hint" id="mw-info">Set where you are asking from.</p>
+      <div class="answers"><button type="button" class="yes" id="mw-closer" disabled>Closer</button><button type="button" class="no" id="mw-further" disabled>Further</button></div>
+      <p class="hint">Measured to the nearest bank (0 if you're on the water). The rules don't say what counts as a body of water, so this uses only the Thames unless you tick the box. Borderline spots, within ${EPS} m of your distance, stay in play.</p>`;
+    const set = () => (useAll ? "all" : "thames");
+    let memo = { k: null, r: null };
+    const mine = () => { // the seekers' distance, cached per point and set
+      if (!draft.askC) return null;
+      const k = draft.askC.join() + set();
+      if (memo.k !== k || !memo.r) memo = { k, r: nearestWater(set(), proj(draft.askC[0], draft.askC[1])) };
+      return memo.r;
+    };
+    el.querySelector("#mw-all").onchange = (e) => { useAll = e.target.checked; drawDraft(); syncPanels(); };
+    const answer = (ans) => { const m = mine(); if (!m) return; add({ type: T, c: draft.askC.slice(), d: Math.round(m.d * 10) / 10, set: set(), ans }); drawDraft(); syncPanels(); };
+    el.querySelector("#mw-closer").onclick = () => answer("closer");
+    el.querySelector("#mw-further").onclick = () => answer("further");
+    hooks.sync.push(() => {
+      const info = el.querySelector("#mw-info"), yes = el.querySelector("#mw-closer"), no = el.querySelector("#mw-further");
+      el.querySelector("#mw-all").checked = useAll;
+      let m = null;
+      if (!draft.askC) info.textContent = "Set where you are asking from.";
+      else if (!S(set()).raw) { if (currentTab === "measure") need(set()); info.textContent = S(set()).failAt && !S(set()).p ? "Couldn't load the water data. Check your connection." : "Loading water data…"; }
+      else {
+        m = mine();
+        const what = set() === "thames" ? "the Thames" : `water (nearest: ${m.n})`;
+        info.textContent = m.d === 0 ? `You're on ${m.n}, so “Further” can't rule anything out.` : `You're ${fmtDual(m.d)} from ${what}.`;
+      }
+      yes.disabled = no.disabled = !m;
+      yes.textContent = m ? `Closer (under ${fmtD(m.d)})` : "Closer"; no.textContent = m ? `Further (over ${fmtD(m.d)})` : "Further";
+    });
+    hooks.draft.push((tab, layer) => {
+      if (!subjectOn("measure", "water") || !draft.askC) return;
+      const m = mine(); if (!m) return;
+      const sty = { pane: "draft", color: "#1d3f94", weight: 2, interactive: false };
+      const q = unproj(m.pt[0], m.pt[1]);
+      if (m.d > 0) {
+        L.polyline([draft.askC, q], { ...sty, dashArray: "3 5" }).addTo(layer);
+        L.circleMarker(q, { ...sty, radius: 4, fillColor: "#fff", fillOpacity: 1 }).addTo(layer);
+        const mp = S(set()).F || S(set()).raw ? within(set(), m.d) : null;
+        if (mp) L.polyline(outlineLL(S(set()).F, mp), { ...sty, weight: 2.5, dashArray: "8 6" }).addTo(layer);
+        else L.circle(draft.askC, { ...sty, radius: m.d, dashArray: "8 6", fill: false }).addTo(layer);
+      }
+    });
+  }
   // ===== end: measure-thames =====
 
   // ===== feature: measure-station =====
