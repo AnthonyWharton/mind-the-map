@@ -129,6 +129,16 @@ details > *:not(summary) { margin-top: 8px; }
 /* ===== end css: measure-station ===== */
 
 /* ===== feature css: poi ===== */
+.poi .poi-on { display: flex; flex-direction: column; gap: 10px; }
+.poi .poi-on[hidden], .poi .poi-off[hidden] { display: none; }
+.poi .poi-cat { flex: 1; }
+.poi .poi-list button { text-align: left; }
+.poi .poi-d { color: var(--muted); font-size: 12px; margin-left: 2px; }
+.poi .poi-list button.on .poi-d { color: #cfd3dc; }
+.poi-pin { width: 100%; height: 100%; border-radius: 50%; background: #6b3fa0; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35); box-sizing: border-box; }
+.poi-pin.dim { background: #b3a6c6; border-width: 1.5px; }
+.poi-pin.sel { background: #6b3fa0; border: 3px solid var(--ink); }
+.leaflet-tooltip.poi-dist { background: #6b3fa0; color: #fff; border: 0; font: 600 12px var(--font-body); padding: 1px 6px; box-shadow: none; }
 /* ===== end css: poi ===== */
 
 /* ===== feature css: gps ===== */
@@ -831,6 +841,471 @@ details > *:not(summary) { margin-top: 8px; }
   // ===== end: measure-station =====
 
   // ===== feature: poi =====
+  // Places of interest for Matching ("Is your nearest ___ the same as mine?"), Measuring ("Compared to me, are
+  // you closer to or further from a ___?") and Tentacles ("Of all the ___ within 1 mile of me, which are you
+  // nearest to?").
+  //
+  // Data: data/poi-places.json, baked once from OpenStreetMap through the Overpass API
+  // (© OpenStreetMap contributors, ODbL 1.0). Nothing is fetched from Overpass at runtime; the scripts that built
+  // it are in data/poi-build/ (fetch.sh, then build.js).
+  // Tag definitions (named features only; a place mapped as both a node and an area is kept once):
+  //   museum     tourism=museum, not access=private/no; plus the big public art galleries people call museums
+  //              (National Gallery, National Portrait Gallery, Tate Britain, Courtauld, Hayward, Serpentine,
+  //              Whitechapel, Saatchi, Dulwich Picture Gallery...), which OSM tags tourism=gallery like dealers
+  //   library    amenity=library, not private/members-only, university, college or school libraries, or book swaps
+  //   cinema     amenity=cinema, not residents-only ones
+  //   hospital   amenity=hospital (NHS and private), not labs, imaging or day clinics, and not wards or units mapped
+  //              separately within 300 m of a hospital
+  //   consulate  office=diplomatic with diplomatic=consulate or embassy (embassies and high commissions do the
+  //              consular work in London), or the older amenity=embassy; not residences, EU-style delegations, or
+  //              embassy offices that don't serve the public (trade, defence, cultural, education sections)
+  //   aquarium   tourism=aquarium
+  //   park       leisure=park, at least 0.5 ha, outline kept; a named garden inside a bigger park is dropped
+  //   golf       leisure=golf_course, at least 2 ha, outline kept; not driving ranges, pitch and putt, footgolf
+  //              or mini golf
+  //   zoo        tourism=zoo, at least 0.3 ha if mapped as an area, outline kept; not petting zoos, city farms,
+  //              aviaries, park animal enclosures or closed ones
+  //   theme      tourism=theme_park (amusement parks), outline kept; not farm parks or model railways
+  // Coverage: the play area (about lat 51.46–51.56, lon −0.24–0.02) plus ~3 km; golf courses ~12 km;
+  // zoos, aquariums and amusement parks ~25 km (for the 15-mile tentacles).
+  // Format: { <cat>: [[name, lat, lon, rings?], ...] }. lat/lon is the centre (for areas, a point inside the outline).
+  // rings (area categories only) are outer rings, simplified to 12–30 m with holes dropped, delta-coded as
+  // integers in 1e-5 degrees: [lat0, lon0, dLat1, dLon1, ...] with the closing point left out.
+  //
+  // Distances to areas are to the nearest edge (0 inside). "Nearest" regions for areas are built from Voronoi
+  // cells of points sampled every POI_STEP metres along each outline, plus the area itself.
+  // Answers: { type: "poi-match", cat, c, place: [name, lat, lon], ans: "same" | "diff" }
+  //          { type: "poi-measure", cat, c, place, d, ans: "closer" | "further" }
+  //          { type: "poi-tentacle", cat, c, r, cands: [[name, lat, lon], ...], place | null, ans: "place" | "none" }
+  const POI_MI = 1609.344, POI_TOL = 25, POI_STEP = 60;
+  const POI_CATS = {
+    park: { one: "park", many: "parks", note: "Named parks and garden squares of half a hectare or more. Distances are to the park’s edge, so it’s 0 inside a park." },
+    theme: { one: "amusement park", many: "amusement parks", tent: 15, note: "Theme parks with rides (Chessington, Thorpe Park). Farm parks don’t count. Distances are to the edge of the site." },
+    zoo: { one: "zoo", many: "zoos", tent: 15, note: "City farms, petting zoos and park animal enclosures don’t count. Distances are to the edge of the site." },
+    aquarium: { one: "aquarium", many: "aquariums", tent: 15, note: "Distances are to the aquarium’s centre point." },
+    golf: { one: "golf course", many: "golf courses", note: "Full courses only: not pitch and putt, driving ranges or mini golf. Distances are to the edge of the course." },
+    museum: { one: "museum", many: "museums", tent: 1, note: "Includes the big public art galleries, like the National Gallery and Tate Britain. Distances are to the centre point." },
+    cinema: { one: "cinema", many: "cinemas", tent: 1, note: "Distances are to the cinema’s centre point." },
+    hospital: { one: "hospital", many: "hospitals", tent: 1, note: "Named hospitals, NHS and private. Distances are to the hospital’s centre point." },
+    library: { one: "library", many: "libraries", tent: 1, note: "Libraries open to the public: not university, school or members-only ones. Distances are to the centre point." },
+    consulate: { one: "consulate", many: "consulates", note: "Embassies and high commissions count too, because in London they do the consular work (their trade or defence offices don’t). Distances are to the centre point." },
+  };
+  const POI_ORDER = { match: ["park", "theme", "zoo", "aquarium", "golf", "museum", "cinema", "hospital", "library", "consulate"], tentacles: ["museum", "library", "cinema", "hospital", "zoo", "aquarium", "theme"] };
+  POI_ORDER.measure = POI_ORDER.match;
+  const POI_TABS = ["match", "measure", "tentacles"];
+  const poiCap = (s) => s[0].toUpperCase() + s.slice(1);
+  const poiMi = (m) => `${m / POI_MI} mile${m === POI_MI ? "" : "s"}`;
+  let poiP = null, poiFailed = false; // poiP: cat -> [{ n, ll, xy, polys, samples, bb }]
+  // Draft drawings are never interactive, but their canvas sits above the stations' and swallowed station taps.
+  // Let taps fall through the pane; interactive markers (the place pins) still opt back in via .leaflet-interactive.
+  map.getPane("draft").style.pointerEvents = "none";
+  map.attributionControl.addAttribution('Places:&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors');
+
+  function poiDecode(raw) {
+    const out = {};
+    for (const cat of Object.keys(POI_CATS)) {
+      out[cat] = (raw[cat] || []).map(([n, lat, lon, rings]) => {
+        const xy = proj(lat, lon); let polys = null, samples = [xy];
+        if (rings && rings.length) {
+          polys = rings.map((r) => {
+            const ring = []; let a = 0, b = 0;
+            for (let i = 0; i + 1 < r.length; i += 2) { a += r[i]; b += r[i + 1]; ring.push(proj(a / 1e5, b / 1e5)); }
+            ring.push(ring[0].slice());
+            return [ring];
+          });
+          if (polys.length > 1) { try { polys = pc.union(...polys.map((p) => [p])); } catch (e) { console.warn("poi union", n, e); } }
+          samples = [];
+          polys.forEach((p) => p.forEach((r) => {
+            for (let i = 1; i < r.length; i++) {
+              const [ax, ay] = r[i - 1], [bx, by] = r[i], k = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / POI_STEP));
+              for (let j = 0; j < k; j++) samples.push([ax + (bx - ax) * j / k, ay + (by - ay) * j / k]);
+            }
+          }));
+        }
+        const pts = polys ? polys.flatMap((p) => p[0]) : [xy];
+        const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+        return { n, ll: [lat, lon], xy, polys, samples, bb: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)] };
+      });
+    }
+    return out;
+  }
+  // Distance (m) from projected point p to a place, and the nearest point of the place.
+  function poiNear(pl, p) {
+    if (!pl.polys) return { d: Math.hypot(p[0] - pl.xy[0], p[1] - pl.xy[1]), q: pl.xy };
+    if (pointInMulti(p, pl.polys)) return { d: 0, q: p };
+    let d = Infinity, q = pl.xy;
+    for (const poly of pl.polys) for (const r of poly) for (let i = 1; i < r.length; i++) {
+      const [ax, ay] = r[i - 1], [bx, by] = r[i], dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+      const t = L2 ? Math.max(0, Math.min(1, ((p[0] - ax) * dx + (p[1] - ay) * dy) / L2)) : 0;
+      const x = ax + t * dx, y = ay + t * dy, e = Math.hypot(p[0] - x, p[1] - y);
+      if (e < d) { d = e; q = [x, y]; }
+    }
+    return { d, q };
+  }
+  const poiDist = (pl, p) => poiNear(pl, p).d;
+  // Lower bound on the distance from p to a place, from its bounding box.
+  const poiBBDist = (bb, [x, y]) => Math.hypot(Math.max(bb[0] - x, 0, x - bb[2]), Math.max(bb[1] - y, 0, y - bb[3]));
+  const poiRef = (pl) => [pl.n, +pl.ll[0].toFixed(5), +pl.ll[1].toFixed(5)];
+  // Find a stored [name, lat, lon] in the data (same name, nearest); falls back to a bare point if the data changed.
+  function poiFind(cat, ref) {
+    const [n, lat, lon] = ref, xy = proj(lat, lon);
+    let best = null, bd = 3000;
+    for (const pl of poiP[cat] || []) if (pl.n === n) { const d = Math.hypot(pl.xy[0] - xy[0], pl.xy[1] - xy[1]); if (d < bd) { bd = d; best = pl; } }
+    return best || { n, ll: [lat, lon], xy, polys: null, samples: [xy], bb: [xy[0], xy[1], xy[0], xy[1]] };
+  }
+  // Area that matters: the box around all hiding zones, plus a margin.
+  const poiBox = () => { const xs = stations.map((s) => s.xy[0]), ys = stations.map((s) => s.xy[1]), m = ZONE_R + 600; return [Math.min(...xs) - m, Math.min(...ys) - m, Math.max(...xs) + m, Math.max(...ys) + m]; };
+  // A place can only affect hiding zones if it is within d of one (bounding-box test, so it errs towards keeping).
+  const poiReach = (pl, d) => stations.some((s) => poiBBDist(pl.bb, s.xy) <= d + ZONE_R + 50);
+
+  // Grid index of all sample points of a list of places, for fast Voronoi cells.
+  function poiGrid(places) {
+    const all = places.flatMap((pl) => pl.samples), xs = all.map((p) => p[0]), ys = all.map((p) => p[1]);
+    const span = all.length ? (Math.max(...xs) - Math.min(...xs) + 1) * (Math.max(...ys) - Math.min(...ys) + 1) : 1;
+    const cs = Math.max(300, 1.5 * Math.sqrt(span / Math.max(1, all.length))), cells = new Map(), pts = [], own = [];
+    let e = [Infinity, Infinity, -Infinity, -Infinity];
+    places.forEach((pl, i) => pl.samples.forEach((s) => {
+      const k = pts.length, gx = Math.floor(s[0] / cs), gy = Math.floor(s[1] / cs), key = gx + "," + gy;
+      pts.push(s); own.push(i);
+      if (!cells.has(key)) cells.set(key, []);
+      cells.get(key).push(k);
+      e = [Math.min(e[0], gx), Math.min(e[1], gy), Math.max(e[2], gx), Math.max(e[3], gy)];
+    }));
+    return { cs, cells, pts, own, e };
+  }
+  const poiGrids = new Map();
+  const poiGridFor = (cat) => poiGrids.get(cat) || poiGrids.set(cat, poiGrid(poiP[cat])).get(cat);
+  // Voronoi cell of point s among the grid's samples, ignoring samples of place `skip`, clipped to box.
+  function poiCell(s, g, skip, box) {
+    const [sx, sy] = s, ci = Math.floor(sx / g.cs), cj = Math.floor(sy / g.cs);
+    let ring = boxRing(box[0], box[1], box[2], box[3]);
+    const far = () => { let m = 0; for (const [x, y] of ring) m = Math.max(m, Math.hypot(x - sx, y - sy)); return m; };
+    let R = far();
+    const kmax = Math.max(ci - g.e[0], g.e[2] - ci, cj - g.e[1], g.e[3] - cj, 0);
+    const visit = (i, j) => {
+      const list = g.cells.get(i + "," + j); if (!list) return true;
+      for (const k of list) {
+        if (g.own[k] === skip) continue;
+        const [tx, ty] = g.pts[k], nx = tx - sx, ny = ty - sy;
+        if (!nx && !ny) continue;
+        if (Math.hypot(nx, ny) > 2 * R) continue;
+        ring = clipHalf(ring, nx, ny, (nx * (sx + tx) + ny * (sy + ty)) / 2);
+        if (ring.length < 4) return false;
+        R = far();
+      }
+      return true;
+    };
+    for (let k = 0; k <= kmax; k++) {
+      if ((k - 1) * g.cs > 2 * R) break;
+      if (k === 0) { if (!visit(ci, cj)) return null; continue; }
+      for (let i = ci - k; i <= ci + k; i++) { if (!visit(i, cj - k) || !visit(i, cj + k)) return null; }
+      for (let j = cj - k + 1; j <= cj + k - 1; j++) { if (!visit(ci - k, j) || !visit(ci + k, j)) return null; }
+    }
+    return ring;
+  }
+  // polygon-clipping can trip over near-coincident vertices from many overlapping cells. Snap to a grid
+  // (1 cm, then coarser) and drop repeated points; retry the operation on a coarser grid if it still fails.
+  function poiSnap(polys, q) {
+    const out = [];
+    for (const poly of polys) {
+      const rings = [];
+      for (const r of poly) {
+        const s = [];
+        for (const [x, y] of r) { const p = [Math.round(x / q) * q, Math.round(y / q) * q], l = s[s.length - 1]; if (!l || l[0] !== p[0] || l[1] !== p[1]) s.push(p); }
+        if (s.length > 1 && (s[0][0] !== s[s.length - 1][0] || s[0][1] !== s[s.length - 1][1])) s.push(s[0].slice());
+        if (s.length >= 4) rings.push(s);
+      }
+      if (rings.length) out.push(rings);
+    }
+    return out;
+  }
+  function poiClip(op, a, ...rest) {
+    let err;
+    for (const q of [0.01, 0.1, 0.5, 2]) {
+      try { return pc[op](poiSnap(a, q), ...rest.map((m) => poiSnap(m, q))); } catch (e) { err = e; }
+    }
+    throw err;
+  }
+  // Union of a list of polygons (each [outer, holes...]).
+  const poiUnion = (parts) => parts.length ? poiClip("union", [parts[0]], ...parts.slice(1).map((p) => [p])) : [];
+  // Everywhere whose nearest place (of `places`) is places[i]: a projected multipolygon.
+  function poiCellRegion(places, i, g) {
+    const pl = places[i], box = poiBox(), parts = [];
+    for (const s of pl.samples) { const r = poiCell(s, g, i, box); if (r && r.length >= 4) parts.push([r]); }
+    if (pl.polys) parts.push(...pl.polys);
+    if (!parts.length) return [];
+    let m = poiUnion(parts);
+    // Inside another place's outline you are 0 m from it, so that's never nearer to this one.
+    const xs = m.flatMap((p) => p[0].map((q) => q[0])), ys = m.flatMap((p) => p[0].map((q) => q[1]));
+    const mb = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    const others = places.filter((o, j) => j !== i && o.polys && o.bb[0] <= mb[2] && o.bb[2] >= mb[0] && o.bb[1] <= mb[3] && o.bb[3] >= mb[1]);
+    if (others.length) m = poiClip("difference", m, ...others.map((o) => o.polys));
+    return m;
+  }
+  // Douglas–Peucker on a closed ring (keeps at least 4 points).
+  function poiSimplify(r, tol) {
+    const pts = r.slice(0, -1); if (pts.length < 5) return r;
+    const keep = new Uint8Array(pts.length); keep[0] = 1;
+    let far = 0, fd = -1; pts.forEach((p, i) => { const d = Math.hypot(p[0] - pts[0][0], p[1] - pts[0][1]); if (d > fd) { fd = d; far = i; } });
+    keep[far] = 1;
+    const st = [[0, far], [far, pts.length]];
+    while (st.length) {
+      const [a, b] = st.pop(), A = pts[a], B = pts[b % pts.length]; let md = 0, mi = -1;
+      for (let i = a + 1; i < b; i++) { const d = segDist(pts[i], A, B); if (d > md) { md = d; mi = i; } }
+      if (md > tol) { keep[mi] = 1; st.push([a, mi], [mi, b]); }
+    }
+    const out = pts.filter((_, i) => keep[i]);
+    if (out.length < 3) return r;
+    out.push(out[0].slice());
+    return out;
+  }
+  // Everywhere within r of any of the places (r may be 0: just the areas themselves).
+  // grow: true builds a slight over-estimate (for keeping), false a slight under-estimate (for removing).
+  // Buffers are unions of convex pieces (circles, and rectangles along outlines) plus the areas themselves. Only the
+  // hiding zones matter, so the work is done per 1 km tile around the stations, where convex clipping is cheap and
+  // a tile wholly inside one piece is simply full.
+  function poiBuffer(places, r, grow) {
+    const n = 16, k = 1 / Math.cos(Math.PI / n), pieces = [], polys = [];
+    const piece = (ring) => { const xs = ring.map((q) => q[0]), ys = ring.map((q) => q[1]); pieces.push({ ring, bb: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)] }); };
+    for (const pl of places) {
+      if (!poiReach(pl, r)) continue;
+      if (!pl.polys) { if (r > 0) piece(circleRing(pl.xy[0], pl.xy[1], grow ? r / Math.cos(Math.PI / 48) : r, 48)); continue; }
+      const tol = Math.max(8, Math.min(60, r / 10));
+      const rr = grow ? (r + tol) * k : r - tol;
+      if (!grow && rr <= 0) continue;
+      polys.push(...pl.polys);
+      if (rr > 0) pl.polys.forEach((p) => p.forEach((ring) => {
+        const line = poiSimplify(ring, tol);
+        for (let i = 0; i < line.length; i++) {
+          const [ax, ay] = line[i]; if (i < line.length - 1) piece(circleRing(ax, ay, rr, n));
+          if (!i) continue;
+          const [px, py] = line[i - 1], d = Math.hypot(ax - px, ay - py); if (!d) continue;
+          const ox = -(ay - py) / d * rr, oy = (ax - px) / d * rr;
+          piece([[px + ox, py + oy], [ax + ox, ay + oy], [ax - ox, ay - oy], [px - ox, py - oy], [px + ox, py + oy]]);
+        }
+      }));
+    }
+    const pbb = polys.map((p) => { const xs = p[0].map((q) => q[0]), ys = p[0].map((q) => q[1]); return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]; });
+    const hit = (a, b) => a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
+    const out = [];
+    for (const [i, j] of poiTiles()) {
+      const box = [i * 1000, j * 1000, (i + 1) * 1000, (j + 1) * 1000], tile = boxRing(...box), corners = tile.slice(0, 4);
+      const parts = []; let full = false;
+      for (const p of pieces) {
+        if (!hit(p.bb, box)) continue;
+        if (corners.every((c) => pointInRing(c, p.ring))) { full = true; break; }
+        let c = p.ring;
+        for (const [nx, ny, cc] of [[1, 0, box[2]], [-1, 0, -box[0]], [0, 1, box[3]], [0, -1, -box[1]]]) { c = clipHalf(c, nx, ny, cc); if (c.length < 4) break; }
+        if (c.length >= 4) parts.push([c]);
+      }
+      if (!full) polys.forEach((p, q) => { if (hit(pbb[q], box)) { try { parts.push(...pc.intersection([p], [[tile]])); } catch (e) { if (grow) full = true; } } });
+      if (full) { out.push([tile]); continue; }
+      if (!parts.length) continue;
+      // If a tile still won't union, err on the safe side: keep all of it, or remove none of it.
+      try { out.push(...poiUnion(parts)); } catch (e) { console.warn("poi tile", e); if (grow) out.push([tile]); }
+    }
+    // Tiles share edges exactly, so this union is easy; if it fails anyway, overlapping input is still read as a union.
+    try { return poiUnion(out); } catch (e) { return out; }
+  }
+  // 1 km tiles (by index) that touch any hiding zone.
+  let poiTileList = null;
+  const poiTiles = () => poiTileList || (poiTileList = [...new Set(stations.flatMap((s) => {
+    const t = [];
+    for (let i = Math.floor((s.xy[0] - ZONE_R) / 1000); i <= Math.floor((s.xy[0] + ZONE_R) / 1000); i++) for (let j = Math.floor((s.xy[1] - ZONE_R) / 1000); j <= Math.floor((s.xy[1] + ZONE_R) / 1000); j++) t.push(i + "," + j);
+    return t;
+  }))].map((k) => k.split(",").map(Number)));
+
+  function poiMatchRegion(c) {
+    if (!poiP || !poiP[c.cat]) return null;
+    const P = poiFind(c.cat, c.place), list = poiP[c.cat];
+    const i = list.indexOf(P);
+    if (i >= 0) return poiCellRegion(list, i, poiGridFor(c.cat));
+    const l2 = list.concat([P]); return poiCellRegion(l2, l2.length - 1, poiGrid(l2));
+  }
+  // Run a region builder; if the geometry fails, ignore that answer (rather than break the map) and say so once.
+  const poiFailedIds = new Set();
+  function poiSafe(c, f) {
+    if (c.id && poiFailedIds.has(c.id)) return null;
+    try { return f(); } catch (e) {
+      console.warn("poi region failed", c, e); if (c.id) poiFailedIds.add(c.id);
+      setTimeout(() => toast("Couldn't work out the area for one place answer, so it's being ignored."), 0);
+      return null;
+    }
+  }
+  QTYPES["poi-match"] = {
+    region: (c) => poiSafe(c, () => poiMatchRegion(c)),
+    keeps: (c) => c.ans === "same",
+    describe: (c) => ({ t: `Nearest ${POI_CATS[c.cat].one}: ${c.place[0]} (asked from ${placeName(c.c)})`, a: c.ans === "same" ? "Same" : "Different", ok: c.ans === "same" }),
+    outline: (c, st, layer) => poiOutline(c, st, layer),
+  };
+  QTYPES["poi-measure"] = {
+    // Closer keeps everywhere within d (+25 m) of any place; Further removes everywhere within d (−25 m).
+    region: (c) => poiSafe(c, () => { if (!poiP || !poiP[c.cat]) return null; return poiBuffer(poiP[c.cat], c.ans === "closer" ? c.d + POI_TOL : c.d - POI_TOL, c.ans === "closer"); }),
+    keeps: (c) => c.ans === "closer",
+    describe: (c) => ({ t: `${poiCap(POI_CATS[c.cat].one)}: closer or further than ${fmtD(c.d)} (asked from ${placeName(c.c)}, nearest ${c.place[0]})`, a: c.ans === "closer" ? "Closer" : "Further", ok: c.ans === "closer" }),
+    outline: (c, st, layer) => poiOutline(c, st, layer),
+  };
+  QTYPES["poi-tentacle"] = {
+    // A place: keep (circle of r around the seekers) ∩ (that place's Voronoi cell among the listed candidates).
+    // None: the hider is further than r away, so remove the circle.
+    region: (c) => poiSafe(c, () => {
+      if (!poiP || !poiP[c.cat]) return null;
+      const [x, y] = proj(c.c[0], c.c[1]);
+      if (c.ans === "none") return [[circleRing(x, y, Math.max(0, c.r - POI_TOL), 128)]];
+      const cands = c.cands.map((r) => poiFind(c.cat, r));
+      const i = c.cands.findIndex((r) => r[0] === c.place[0] && Math.abs(r[1] - c.place[1]) < 1e-4 && Math.abs(r[2] - c.place[2]) < 1e-4);
+      if (i < 0) return null;
+      const circle = [[circleRing(x, y, c.r + POI_TOL, 128)]];
+      return poiClip("intersection", circle, poiCellRegion(cands, i, poiGrid(cands)));
+    }),
+    keeps: (c) => c.ans === "place",
+    describe: (c) => ({ t: `Tentacles: ${POI_CATS[c.cat].many} within ${poiMi(c.r)} of ${placeName(c.c)}`, a: c.ans === "place" ? `Nearest: ${c.place[0]}` : `Not within ${c.r / POI_MI} mi`, ok: c.ans === "place" }),
+    outline: (c, st, layer) => poiOutline(c, st, layer),
+  };
+  function poiOutline(c, st, layer) {
+    const g = regionCache.get(c.id);
+    if (g && g.length) L.polygon(toLL(g), st).addTo(layer);
+    if (c.place) L.circleMarker([c.place[1], c.place[2]], { ...st, radius: 5, dashArray: null }).addTo(layer);
+  }
+
+  // ---- panels ----
+  const poiUI = {};
+  const poiCatsFor = (tab) => {
+    if (tab !== "tentacles") return POI_ORDER[tab];
+    const size = state.size || "medium";
+    if (size === "small") return [];
+    return POI_ORDER.tentacles.filter((k) => POI_CATS[k].tent === 1 || size === "large");
+  };
+  // Everything a panel needs, worked out from the draft: category, ranked places, chosen place, tentacle candidates.
+  function poiNow(tab) {
+    const u = poiUI[tab], cats = poiCatsFor(tab);
+    if (!cats.includes(u.cat)) u.cat = cats[0];
+    const cat = u.cat;
+    if (!cat || !poiP || !draft.askC) return { cat };
+    const key = cat + "|" + draft.askC.join(",");
+    if (u.key !== key) { u.key = key; u.pick = null; u.all = false; }
+    const p = proj(draft.askC[0], draft.askC[1]);
+    const ranked = poiP[cat].map((pl) => ({ pl, d: poiDist(pl, p) })).sort((a, b) => a.d - b.d);
+    if (!ranked.length) return { cat };
+    if (tab === "tentacles") {
+      const r = POI_CATS[cat].tent * POI_MI, cands = ranked.filter((x) => x.d <= r);
+      if (u.pick && !cands.some((x) => x.pl === u.pick)) u.pick = null;
+      return { cat, p, ranked, cands, r, chosen: u.pick ? cands.find((x) => x.pl === u.pick) : null };
+    }
+    return { cat, p, ranked, chosen: (u.pick && ranked.find((x) => x.pl === u.pick)) || ranked[0] };
+  }
+  function poiChoose(tab, pl) {
+    const u = poiUI[tab];
+    if (tab === "tentacles") { const s = poiNow(tab); if (!s.cands || !s.cands.some((x) => x.pl === pl)) { toast(`${pl.n} isn’t within ${poiMi(s.r)} of you.`); return; } }
+    u.pick = u.pick === pl && tab === "tentacles" ? null : pl;
+    drawDraft(); syncPanels();
+  }
+  function poiAnswer(tab, yes) {
+    const s = poiNow(tab);
+    if (!s.ranked) return;
+    const c = draft.askC.slice();
+    if (tab === "match") add({ type: "poi-match", cat: s.cat, c, place: poiRef(s.chosen.pl), ans: yes ? "same" : "diff" });
+    if (tab === "measure") add({ type: "poi-measure", cat: s.cat, c, place: poiRef(s.chosen.pl), d: Math.round(s.chosen.d * 10) / 10, ans: yes ? "closer" : "further" });
+    if (tab === "tentacles") {
+      if (yes && !s.chosen) return;
+      add({ type: "poi-tentacle", cat: s.cat, c, r: s.r, cands: s.cands.map((x) => poiRef(x.pl)), place: yes ? poiRef(s.chosen.pl) : null, ans: yes ? "place" : "none" });
+    }
+    poiUI[tab].pick = null; drawDraft(); syncPanels();
+  }
+  function poiBuild(tab) {
+    const el = addSubject(tab, "poi", "Places");
+    el.classList.add("poi");
+    el.innerHTML = `<p class="hint poi-off" hidden>Tentacles aren’t asked in small games.</p>
+      <div class="poi-on">
+        <div class="row"><label for="poi-cat-${tab}">Place</label><select id="poi-cat-${tab}" class="poi-cat"></select></div>
+        <p class="hint poi-info"></p>
+        <div class="chips poi-list"></div>
+        <div class="answers">${tab === "match" ? `<button type="button" class="yes">Same nearest</button><button type="button" class="no">Different</button>`
+          : tab === "measure" ? `<button type="button" class="yes">Closer</button><button type="button" class="no">Further</button>`
+          : `<button type="button" class="yes">Pick their answer</button><button type="button" class="no">Not within 1 mi</button>`}</div>
+        <p class="hint poi-note"></p>
+      </div>`;
+    const u = poiUI[tab] = { el, cat: poiCatsFor(tab)[0], pick: null, key: "", all: false, sig: "" };
+    el.querySelector(".poi-cat").addEventListener("change", (e) => { u.cat = e.target.value; drawDraft(); syncPanels(); });
+    el.querySelector(".poi-list").addEventListener("click", (e) => {
+      const b = e.target.closest("button"); if (!b) return;
+      if (b.dataset.all) { u.all = !u.all; syncPanels(); return; }
+      const s = poiNow(tab), x = s.ranked && s.ranked[+b.dataset.i];
+      if (x) poiChoose(tab, x.pl);
+    });
+    el.querySelector(".yes").onclick = () => poiAnswer(tab, true);
+    el.querySelector(".no").onclick = () => poiAnswer(tab, false);
+  }
+  function poiSync(tab) {
+    const u = poiUI[tab], el = u.el, cats = poiCatsFor(tab);
+    const sig = cats.join();
+    if (u.sig !== sig) {
+      u.sig = sig;
+      el.querySelector(".poi-cat").innerHTML = cats.map((k) => `<option value="${k}">${esc(poiCap(POI_CATS[k].one))}${tab === "tentacles" ? ` (${POI_CATS[k].tent} mi)` : ""}</option>`).join("");
+    }
+    el.querySelector(".poi-off").hidden = !!cats.length;
+    el.querySelector(".poi-on").hidden = !cats.length;
+    if (!cats.length) return;
+    const s = poiNow(tab), C = POI_CATS[s.cat];
+    el.querySelector(".poi-cat").value = s.cat;
+    const info = el.querySelector(".poi-info"), list = el.querySelector(".poi-list"), yes = el.querySelector(".yes"), no = el.querySelector(".no");
+    el.querySelector(".poi-note").textContent = C.note + " From OpenStreetMap, so the odd one may be missing.";
+    yes.disabled = no.disabled = true; list.innerHTML = "";
+    if (tab === "tentacles") no.textContent = `Not within ${C.tent} mi`;
+    if (tab === "tentacles") yes.textContent = "Pick their answer";
+    if (!poiP) { info.textContent = poiFailed ? "Place data didn’t load. Refresh to try again." : "Loading places…"; return; }
+    if (!draft.askC) { info.textContent = "Set where you are asking from."; return; }
+    if (!s.ranked) { info.textContent = `No ${C.many} in the data.`; return; }
+    const chip = (x) => `<button type="button" data-i="${s.ranked.indexOf(x)}" class="${s.chosen && x === s.chosen ? "on" : ""}">${esc(x.pl.n)} <span class="poi-d">${fmtD(x.d)}</span></button>`;
+    if (tab === "tentacles") {
+      const n = s.cands.length;
+      no.disabled = false;
+      if (!n) { info.textContent = `No ${C.many} within ${poiMi(s.r)} of you, so the hider can only say they’re not within ${C.tent} mi.`; return; }
+      info.textContent = `${n} ${n === 1 ? C.one : C.many} within ${poiMi(s.r)} of you. Tap the one the hider names, here or on the map.`;
+      const show = u.all ? s.cands : s.cands.slice(0, 8);
+      list.innerHTML = show.map(chip).join("") + (n > 8 ? `<button type="button" data-all="1">${u.all ? "Show fewer" : `Show all ${n}`}</button>` : "");
+      yes.disabled = !s.chosen;
+      yes.textContent = s.chosen ? `Nearest: ${s.chosen.pl.n}` : "Pick their answer";
+      return;
+    }
+    const x = s.chosen;
+    info.textContent = `${s.chosen === s.ranked[0] ? "Your nearest" : "You picked"} ${C.one}: ${x.pl.n}, ${fmtDual(x.d)} away.${tab === "measure" ? ` Closer keeps everywhere within that distance of any ${C.one} (with 25 m leeway).` : ""} Not right? Tap the one you think is nearest.`;
+    const top = s.ranked.slice(0, 4);
+    if (!top.includes(x)) top.push(x);
+    list.innerHTML = top.map(chip).join("");
+    yes.disabled = no.disabled = false;
+  }
+  const poiIcon = (cls, sz) => L.divIcon({ className: "", html: `<div class="poi-pin ${cls}"></div>`, iconSize: [sz, sz], iconAnchor: [sz / 2, sz / 2] });
+  hooks.draft.push((tab, layer) => {
+    if (!POI_TABS.includes(tab) || !subjectOn(tab, "poi") || !poiP || !poiCatsFor(tab).length) return;
+    const s = poiNow(tab);
+    if (!s.cat) return;
+    const cand = s.cands ? new Set(s.cands.map((x) => x.pl)) : null;
+    const chosen = s.chosen && s.chosen.pl;
+    if (s.r && draft.askC) L.circle(draft.askC, { pane: "draft", radius: s.r, color: "#6b3fa0", weight: 2, dashArray: "6 6", fill: false, interactive: false }).addTo(layer);
+    // Areas (parks etc.) show their outlines; only the nearest few get a pin, or the map fills up with dots.
+    const pinned = poiP[s.cat].some((pl) => pl.polys) ? new Set(s.ranked ? (s.cands || s.ranked).slice(0, 12).map((x) => x.pl) : []) : null;
+    for (const pl of poiP[s.cat]) {
+      const on = !cand || cand.has(pl), sel = pl === chosen;
+      if (pl.polys) L.polygon(toLL(pl.polys), { pane: "draft", color: "#6b3fa0", weight: sel ? 2.5 : 1, opacity: on ? 0.8 : 0.3, fillColor: "#6b3fa0", fillOpacity: sel ? 0.22 : on ? 0.08 : 0.03, interactive: false }).addTo(layer);
+      if (pinned && pl.polys && !sel && !pinned.has(pl)) continue;
+      const m = L.marker(pl.ll, { pane: "draft", icon: poiIcon(sel ? "sel" : on ? "" : "dim", sel ? 16 : on ? 12 : 9), keyboard: false, zIndexOffset: sel ? 1000 : on ? 100 : 0 })
+        .bindTooltip(pl.n, { direction: "top", offset: [0, -6] }).addTo(layer);
+      m.on("click", (e) => { if (pick) { setPoint([e.latlng.lat, e.latlng.lng]); return; } poiChoose(tab, pl); });
+    }
+    if (chosen && draft.askC && s.chosen.d > 0) {
+      const q = poiNear(chosen, s.p).q;
+      L.polyline([draft.askC, unproj(q[0], q[1])], { pane: "draft", color: "#6b3fa0", weight: 2.5, dashArray: "2 6", interactive: false })
+        .bindTooltip(fmtD(s.chosen.d), { permanent: true, direction: "center", className: "poi-dist" }).addTo(layer);
+    }
+  });
+  window.__poi = { get data() { return poiP; }, near: poiNear, find: poiFind, now: poiNow, ui: poiUI };
+  POI_TABS.forEach(poiBuild);
+  hooks.sync.push(() => POI_TABS.forEach(poiSync));
+  loadJSON("data/poi-places.json").then((raw) => {
+    poiP = poiDecode(raw);
+    render(); drawDraft(); syncPanels();
+  }).catch((e) => { console.warn("poi data", e); poiFailed = true; syncPanels(); });
   // ===== end: poi =====
 
   // ===== feature: gps =====
