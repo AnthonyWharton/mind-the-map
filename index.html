@@ -120,6 +120,8 @@ details > *:not(summary) { margin-top: 8px; }
 /* ===== end css: match-name ===== */
 
 /* ===== feature css: admin ===== */
+.adm-q { color: var(--ink); font-weight: 500; }
+.adm-name { color: var(--ink); font-weight: 600; }
 /* ===== end css: admin ===== */
 
 /* ===== feature css: measure-thames ===== */
@@ -822,6 +824,311 @@ details > *:not(summary) { margin-top: 8px; }
   // ===== end: match-name =====
 
   // ===== feature: admin =====
+  // Administrative divisions, as defined for London games: 1st = north or south of the Thames,
+  // 2nd = London boroughs (the City of London is one), 3rd = wards.
+  // Data: data/admin-divisions.json is TopoJSON pre-baked with mapshaper from the ONS Open Geography Portal
+  // "Wards (December 2025) Boundaries UK BFE" (the May 2022 London wards; in this area only two Tower Hamlets
+  // wards have since been renamed), dissolved to boroughs, clipped to lat 51.46–51.56, lon −0.24–0.02 and
+  // simplified (Douglas–Peucker, 5 m) with shared borders kept identical. BFE boundaries run down the middle
+  // of the Thames. Licence: Open Government Licence v3.0.
+  // North/south is derived from the boroughs: every borough in the clip box is wholly on one side, so the
+  // river border is the borough boundary down the middle of the river. Only borders inside the clip box
+  // count (the out-of-bounds rule); the clip box's own edges are never borders.
+  // polygon-clipping 0.15 sometimes throws ("Unable to find segment…", "Unable to complete output ring…") on
+  // near-coincident edges, e.g. in render()'s mask union once regions with many vertices are in play (about 1 in 10
+  // border-measuring answers in testing). Retrying with every coordinate snapped to a 1 µm grid fixed every failure
+  // seen. This only changes behaviour after a throw. (Cross-cutting: it could move to the shared geometry code.)
+  if (!pc.__retry) {
+    const sn = (g) => (m) => Array.isArray(m[0]) && Array.isArray(m[0][0]) && Array.isArray(m[0][0][0])
+      ? m.map((poly) => poly.map((ring) => ring.map(([x, y]) => [Math.round(x / g) * g, Math.round(y / g) * g])))
+      : m.map((ring) => ring.map(([x, y]) => [Math.round(x / g) * g, Math.round(y / g) * g]));
+    for (const op of ["union", "intersection", "difference", "xor"]) {
+      const f = pc[op];
+      pc[op] = (...args) => {
+        try { return f(...args); } catch (e) {
+          for (const g of [1e-6, 1e-4, 1e-2]) { try { return f(...args.map(sn(g))); } catch (e2) {} }
+          throw e;
+        }
+      };
+    }
+    pc.__retry = true;
+  }
+  {
+    map.attributionControl.addAttribution('Boundaries: contains National Statistics and OS data © Crown copyright and database right (<a href="https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/">OGL</a>)');
+    const URL_ = "data/admin-divisions.json";
+    // Metres added in the hider's favour on measuring cuts: 5 m simplification, rounding, and a little spare.
+    const SLACK = 10;
+    const LV = {
+      1: { key: "admin1", what: "side of the river", short: "River side", ord: "1st" },
+      2: { key: "admin2", what: "borough", short: "Borough", ord: "2nd" },
+      3: { key: "admin3", what: "ward", short: "Ward", ord: "3rd" },
+    };
+    let A = null, P = null, failed = false;
+
+    const bboxOf = (pts, bb = [Infinity, Infinity, -Infinity, -Infinity]) => {
+      for (const [x, y] of pts) { if (x < bb[0]) bb[0] = x; if (y < bb[1]) bb[1] = y; if (x > bb[2]) bb[2] = x; if (y > bb[3]) bb[3] = y; }
+      return bb;
+    };
+    const bbDist = (bb, [x, y]) => Math.hypot(Math.max(bb[0] - x, 0, x - bb[2]), Math.max(bb[1] - y, 0, y - bb[3]));
+
+    function build(t) {
+      const [sx, sy] = t.transform.scale, [tx, ty] = t.transform.translate;
+      const arcs = t.arcs.map((a) => { let x = 0, y = 0; return a.map(([dx, dy]) => { x += dx; y += dy; return proj(y * sy + ty, x * sx + tx); }); });
+      const arc = (i) => (i >= 0 ? arcs[i] : arcs[~i].slice().reverse());
+      const path = (ids) => { const out = []; ids.forEach((i, k) => { const a = arc(i); for (let j = k ? 1 : 0; j < a.length; j++) out.push(a[j]); }); return out; };
+      const polyIds = (g) => (g.type === "Polygon" ? [g.arcs] : g.type === "MultiPolygon" ? g.arcs : []);
+      const lineIds = (g) => (g.type === "LineString" ? [g.arcs] : g.type === "MultiLineString" ? g.arcs : []);
+      const line = (xy) => ({ xy, bb: bboxOf(xy), ll: xy.map(([x, y]) => unproj(x, y)) });
+      const div = (g, k, n, sub) => {
+        const m = polyIds(g).map((p) => p.map(path));
+        const bb = [Infinity, Infinity, -Infinity, -Infinity]; m.forEach((p) => bboxOf(p[0], bb));
+        return { k, n, sub, m, bb, rings: m.flat() };
+      };
+      const o = t.objects;
+      const sideName = { N: "North of the river", S: "South of the river" };
+      const levels = {
+        1: o.sides.geometries.map((g) => div(g, g.properties.s, sideName[g.properties.s])),
+        2: o.boroughs.geometries.map((g) => div(g, g.properties.b, g.properties.bn)),
+        3: o.wards.geometries.map((g) => div(g, g.properties.c, g.properties.n, g.properties.bn)),
+      };
+      // Ward lines for the map preview: arcs used by two ward rings (arcs used once are the clip box edge).
+      const uses = new Map();
+      o.wards.geometries.forEach((g) => polyIds(g).flat(2).forEach((i) => { const j = i >= 0 ? i : ~i; uses.set(j, (uses.get(j) || 0) + 1); }));
+      const wardLines = [...uses].filter(([, n]) => n > 1).map(([j]) => line(arcs[j]));
+      const borders = {
+        1: o.river.geometries.flatMap((g) => lineIds(g).map((ids) => line(path(ids)))),
+        2: o.bborders.geometries.flatMap((g) => lineIds(g).map((ids) => line(path(ids)))),
+      };
+      return { levels, borders, wardLines };
+    }
+    function ensure() {
+      if (A || P) return P;
+      failed = false;
+      P = loadJSON(URL_).then((t) => { A = build(t); render(); drawDraft(); syncPanels(); })
+        .catch((e) => { console.warn("admin data", e); P = null; failed = true; syncPanels(); });
+      return P;
+    }
+
+    function findDiv(lvl, xy) {
+      if (!A) return null;
+      return A.levels[lvl].find((d) => xy[0] >= d.bb[0] && xy[0] <= d.bb[2] && xy[1] >= d.bb[1] && xy[1] <= d.bb[3] && pointInMulti(xy, d.m)) || null;
+    }
+    const divByKey = (lvl, k) => (A ? A.levels[lvl].find((d) => d.k === k) || null : null);
+    // Nearest point on a set of lines: { d, q } in projected metres.
+    function nearestOn(lines, p) {
+      let d = Infinity, q = null;
+      for (const ln of lines) {
+        if (bbDist(ln.bb, p) >= d) continue;
+        const pts = ln.xy;
+        for (let i = 1; i < pts.length; i++) {
+          const [ax, ay] = pts[i - 1], [bx, by] = pts[i], dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+          let s = L2 ? ((p[0] - ax) * dx + (p[1] - ay) * dy) / L2 : 0; s = Math.max(0, Math.min(1, s));
+          const cx = ax + s * dx, cy = ay + s * dy, e = Math.hypot(p[0] - cx, p[1] - cy);
+          if (e < d) { d = e; q = [cx, cy]; }
+        }
+      }
+      return { d, q };
+    }
+    // Douglas–Peucker on a projected polyline.
+    function simplify(pts, tol) {
+      if (pts.length < 3) return pts.slice();
+      const keep = new Uint8Array(pts.length); keep[0] = keep[pts.length - 1] = 1;
+      const st = [[0, pts.length - 1]];
+      while (st.length) {
+        const [a, b] = st.pop(); let md = -1, mi = -1;
+        for (let i = a + 1; i < b; i++) { const e = segDist(pts[i], pts[a], pts[b]); if (e > md) { md = e; mi = i; } }
+        if (md > tol) { keep[mi] = 1; st.push([a, mi], [mi, b]); }
+      }
+      return pts.filter((_, i) => keep[i]);
+    }
+    // Only the parts of lines that can matter: segments within `extra` metres of some hiding zone.
+    // Generous (at least 1 km zone reach) so cached regions stay valid if zones change size.
+    function nearZones(lines, extra) {
+      const reach = Math.max(1000, ...stations.map((s) => Math.hypot(s.ring[0][0] - s.xy[0], s.ring[0][1] - s.xy[1]))) + extra;
+      const cs = stations.map((s) => s.xy), out = [];
+      for (const pts of lines) {
+        let cur = null;
+        for (let i = 1; i < pts.length; i++) {
+          const a = pts[i - 1], b = pts[i];
+          if (cs.some((c) => segDist(c, a, b) <= reach)) { if (!cur) { cur = [a]; out.push(cur); } cur.push(b); } else cur = null;
+        }
+      }
+      return out;
+    }
+    // Buffer of radius r around projected polylines: the union of one convex capsule per segment (the hull of
+    // the two end n-gons). The n-gon vertices sit on a fixed angle grid, so neighbouring capsules share their
+    // joint vertices exactly, which keeps polygon-clipping clear of near-coincident edges.
+    // outer: circumscribe the circle (never smaller than the true buffer); otherwise inscribe it (never bigger).
+    function hull(pts) {
+      pts.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+      const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+      const lo = [], hi = [];
+      for (const p of pts) { while (lo.length > 1 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+      for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (hi.length > 1 && cross(hi[hi.length - 2], hi[hi.length - 1], p) <= 0) hi.pop(); hi.push(p); }
+      const ring = lo.slice(0, -1).concat(hi.slice(0, -1)); ring.push(ring[0].slice());
+      return ring;
+    }
+    const snap = (v, g) => Math.round(v / g) * g;
+    function unionSafe(parts) {
+      if (!parts.length) return [];
+      try { return pc.union(...parts); } catch (e) { console.warn("admin: buffer union failed", e.message); return null; }
+    }
+    function bufferLines(lines, r, n, outer) {
+      if (r <= 0) return [];
+      const rr = outer ? r / Math.cos(Math.PI / n) : r;
+      const offs = [];
+      for (let k = 0; k < n; k++) { const a = 2 * Math.PI * k / n; offs.push([rr * Math.cos(a), rr * Math.sin(a)]); }
+      const gon = ([x, y]) => offs.map(([u, v]) => [snap(x + u, 0.001), snap(y + v, 0.001)]);
+      const parts = [];
+      for (const pts of lines) {
+        if (pts.length === 1) { const g = gon(pts[0]); g.push(g[0].slice()); parts.push([[g]]); continue; }
+        for (let i = 1; i < pts.length; i++) {
+          const a = pts[i - 1], b = pts[i];
+          if (a[0] === b[0] && a[1] === b[1]) continue;
+          parts.push([[hull(gon(a).concat(gon(b)))]]);
+        }
+      }
+      return unionSafe(parts);
+    }
+
+    // ----- Matching: "Is your 1st/2nd/3rd administrative division the same as mine?" -----
+    QTYPES["admin-match"] = {
+      region(c) {
+        if (!A) { ensure(); return null; }
+        const d = divByKey(c.lvl, c.k) || findDiv(c.lvl, proj(c.c[0], c.c[1]));
+        return d ? d.m : [];
+      },
+      keeps: (c) => c.ans === "same",
+      describe(c) {
+        const lv = LV[c.lvl] || LV[2];
+        const name = c.lvl === 1 ? String(c.name).replace(/^./, (x) => x.toLowerCase()) : c.name + (c.sub ? ` (${c.sub})` : "");
+        return { t: `${lv.short} (${lv.ord} division): ${name}, asked from ${placeName(c.c)}`, a: c.ans === "same" ? "Same" : "Different", ok: c.ans === "same" };
+      },
+      outline(c, style, layer) {
+        if (!A) { ensure(); return; }
+        const d = divByKey(c.lvl, c.k);
+        if (d) L.polygon(toLL(d.m), style).addTo(layer);
+      },
+    };
+    const matchUI = {};
+    for (const lvl of [1, 2, 3]) {
+      const lv = LV[lvl];
+      const el = addSubject("match", lv.key, lvl === 1 ? "River side (1st division)" : `${lv.short} (${lv.ord})`);
+      el.innerHTML = `<p class="hint adm-q">“Is your ${lv.ord} administrative division (${lv.what}) the same as mine?”</p>
+        <p class="hint adm-you"></p>
+        <div class="answers"><button type="button" class="yes">Yes, same ${lvl === 1 ? "side" : lv.what}</button><button type="button" class="no">No, different</button></div>
+        <p class="hint">${{
+          1: "North or south of the Thames. The border runs down the middle of the river, along the borough boundaries, so bridges are split halfway.",
+          2: "London boroughs. The City of London counts as one.",
+          3: "London wards (the 2022 boundaries, current ONS names).",
+        }[lvl]} Borders are simplified, so they can be out by about 5 m.</p>`;
+      const [yes, no] = el.querySelectorAll(".answers button");
+      const go = (ans) => {
+        const d = A && draft.askC && findDiv(lvl, proj(draft.askC[0], draft.askC[1]));
+        if (!d) return;
+        add({ type: "admin-match", lvl, c: draft.askC.slice(), k: d.k, name: d.n, ...(d.sub ? { sub: d.sub } : {}), ans });
+        drawDraft(); syncPanels();
+      };
+      yes.onclick = () => go("same"); no.onclick = () => go("diff");
+      matchUI[lvl] = { el, yes, no, you: el.querySelector(".adm-you") };
+    }
+
+    // ----- Measuring: "Compared to me, are you closer to or further from a 1st/2nd division border?" -----
+    // Buffers use border lines simplified a little more (by tol, at least BUF_TOL and more for big radii, where
+    // detail is lost in the buffer anyway), and that tolerance is added in the hider's favour.
+    const BUF_TOL = 15;
+    const bufLines = {};
+    const linesFor = (lvl, tol) => bufLines[lvl + ":" + tol] || (bufLines[lvl + ":" + tol] = A.borders[lvl].map((ln) => simplify(ln.xy, tol)));
+    QTYPES["admin-measure"] = {
+      region(c) {
+        if (!A) { ensure(); return null; }
+        const tol = Math.max(BUF_TOL, 5 * Math.round(c.d / 500)), pad = SLACK + tol;
+        const r = c.ans === "closer" ? c.d + pad : c.d - pad;
+        if (r <= 0) return [];
+        // Enough joint vertices that the polygon is within max(3 m, r/400) of a true circle (circumscribed for
+        // Closer, inscribed for Further, so this only ever leaves extra area possible).
+        const err = Math.max(3, r / 400), n = Math.max(16, Math.min(64, Math.ceil(Math.PI / Math.acos(1 / (1 + err / r)))));
+        const g = bufferLines(nearZones(linesFor(c.lvl, tol), r), r, n, c.ans === "closer");
+        if (g) return g;
+        // Geometry failed: rule nothing out rather than the wrong thing.
+        return c.ans === "closer" ? [[boxRing(-1e6, -1e6, 1e6, 1e6)]] : [];
+      },
+      keeps: (c) => c.ans === "closer",
+      describe(c) {
+        const what = c.lvl === 1 ? "River border (1st division)" : "Borough border (2nd division)";
+        return { t: `${what}: seekers ${fmtD(c.d)} away at ${placeName(c.c)}`, a: c.ans === "closer" ? "Closer" : "Further", ok: c.ans === "closer" };
+      },
+      outline(c, style, layer) {
+        if (!A) { ensure(); return; }
+        const ll = A.borders[c.lvl].map((ln) => ln.ll);
+        if (ll.length) L.polyline(ll, style).addTo(layer);
+      },
+    };
+    const measUI = {};
+    for (const lvl of [1, 2]) {
+      const key = "adminb" + lvl, what = lvl === 1 ? "the river border" : "a borough border";
+      const el = addSubject("measure", key, lvl === 1 ? "River border (1st division border)" : "Borough border (2nd division border)");
+      el.innerHTML = `<p class="hint adm-q">“Compared to me, are you closer to or further from ${what}?”</p>
+        <p class="hint adm-you"></p>
+        <div class="answers"><button type="button" class="yes">Closer</button><button type="button" class="no">Further</button></div>
+        <p class="hint">${lvl === 1 ? "The north/south border runs down the middle of the Thames." : "Any boundary between two London boroughs (the City of London counts as one)."} Only borders inside the play area count. About ${SLACK + BUF_TOL} m either side of the cut (more for long distances) is left possible, to allow for simplified boundaries.</p>`;
+      const [yes, no] = el.querySelectorAll(".answers button");
+      const go = (ans) => {
+        if (!A || !draft.askC) return;
+        const n = nearestOn(A.borders[lvl], proj(draft.askC[0], draft.askC[1]));
+        if (!isFinite(n.d)) return;
+        add({ type: "admin-measure", lvl, c: draft.askC.slice(), d: Math.round(n.d), ans });
+        drawDraft(); syncPanels();
+      };
+      yes.onclick = () => go("closer"); no.onclick = () => go("further");
+      measUI[lvl] = { el, yes, no, you: el.querySelector(".adm-you") };
+    }
+
+    const showing = () => [1, 2, 3].some((l) => subjectOn("match", LV[l].key)) || [1, 2].some((l) => subjectOn("measure", "adminb" + l));
+    hooks.sync.push(() => {
+      if (showing()) ensure();
+      const xy = draft.askC && proj(draft.askC[0], draft.askC[1]);
+      const status = failed ? "Boundary data didn't load. Check your connection and try again." : !A ? "Loading boundaries…" : null;
+      for (const lvl of [1, 2, 3]) {
+        const u = matchUI[lvl], d = A && xy ? findDiv(lvl, xy) : null;
+        u.you.innerHTML = status ? esc(status) : !xy ? "Set where you are asking from to see your " + LV[lvl].what + "."
+          : !d ? "That point is outside the mapped area."
+          : lvl === 1 ? `You are <b class="adm-name">${esc(d.n.toLowerCase())}</b>.`
+          : `Your ${LV[lvl].what}: <b class="adm-name">${esc(d.n)}</b>${d.sub ? ` (${esc(d.sub)})` : ""}`;
+        u.yes.disabled = u.no.disabled = !d;
+      }
+      for (const lvl of [1, 2]) {
+        const u = measUI[lvl], n = A && xy ? nearestOn(A.borders[lvl], xy) : null, ok = n && isFinite(n.d);
+        u.you.innerHTML = status ? esc(status) : !xy ? "Set where you are asking from to measure your distance."
+          : ok ? `You are <b class="adm-name">${esc(fmtDual(n.d))}</b> from ${lvl === 1 ? "the river border" : "the nearest borough border"}.` : "No border found.";
+        u.yes.disabled = u.no.disabled = !ok;
+      }
+    });
+    hooks.draft.push((tab, layer) => {
+      if (!A) return;
+      const base = { pane: "draft", color: "#1d3f94", interactive: false };
+      const xy = draft.askC && proj(draft.askC[0], draft.askC[1]);
+      for (const lvl of [1, 2, 3]) {
+        if (!subjectOn("match", LV[lvl].key)) continue;
+        const lines = lvl === 3 ? A.wardLines : A.borders[lvl];
+        L.polyline(lines.map((l) => l.ll), { ...base, weight: lvl === 3 ? 2 : 2.5, opacity: 0.8 }).addTo(layer);
+        const d = xy && findDiv(lvl, xy);
+        if (d) L.polygon(toLL(d.m), { ...base, weight: 2.5, fillColor: "#1d3f94", fillOpacity: 0.12 }).addTo(layer);
+      }
+      for (const lvl of [1, 2]) {
+        if (!subjectOn("measure", "adminb" + lvl)) continue;
+        L.polyline(A.borders[lvl].map((l) => l.ll), { ...base, weight: 3, opacity: 0.8 }).addTo(layer);
+        const n = xy && nearestOn(A.borders[lvl], xy);
+        if (n && n.q) {
+          const q = unproj(n.q[0], n.q[1]);
+          L.polyline([draft.askC, q], { ...base, weight: 2, dashArray: "4 5" }).addTo(layer);
+          L.circleMarker(q, { ...base, radius: 4, weight: 2, fillColor: "#fff", fillOpacity: 1 }).addTo(layer);
+        }
+      }
+    });
+    if (state.cons.some((c) => c.type === "admin-match" || c.type === "admin-measure")) ensure();
+    window.__admin = { ensure, findDiv, nearestOn, get A() { return A; }, simplify, nearZones, bufferLines };
+  }
   // ===== end: admin =====
 
   // ===== feature: measure-thames =====
