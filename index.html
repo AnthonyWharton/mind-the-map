@@ -126,6 +126,9 @@ details > *:not(summary) { margin-top: 8px; }
 /* ===== end css: measure-thames ===== */
 
 /* ===== feature css: measure-station ===== */
+.leaflet-tooltip.ms-near { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 2px 6px; font: 600 12px var(--font-body); box-shadow: 0 1px 4px rgba(0,0,0,.3); }
+.leaflet-tooltip.ms-near::before { border-top-color: var(--accent); }
+.ms-retry[hidden] { display: none; }
 /* ===== end css: measure-station ===== */
 
 /* ===== feature css: poi ===== */
@@ -252,6 +255,8 @@ details > *:not(summary) { margin-top: 8px; }
   const ringArea = (r) => { let s = 0; for (let i = 0; i < r.length - 1; i++) s += r[i][0] * r[i + 1][1] - r[i + 1][0] * r[i][1]; return s / 2; };
   const multiArea = (m) => Math.abs(m.reduce((t, poly) => t + poly.reduce((u, ring) => u + ringArea(ring), 0), 0));
   const toLL = (m) => m.map((poly) => poly.map((ring) => ring.map(([x, y]) => unproj(x, y))));
+  // Round a projected multipolygon to a 1 cm grid, dropping repeated corners and rings that collapse.
+  const snapMulti = (m) => m.map((poly) => poly.map((ring) => ring.map(([x, y]) => [Math.round(x * 100) / 100, Math.round(y * 100) / 100]).filter((p, i, a) => !i || p[0] !== a[i - 1][0] || p[1] !== a[i - 1][1])).filter((r) => r.length >= 4)).filter((poly) => poly.length);
   const fmtD = (m) => m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(m < 10000 ? 2 : 1).replace(/\.?0+$/, "")} km`;
   const fmtDual = (m) => `${fmtD(m)} (${(m / 1609.344).toFixed(2).replace(/\.?0+$/, "")} mi)`;
   const pointInRing = ([x, y], r) => { let c = false; for (let i = 0, j = r.length - 1; i < r.length; j = i++) { if ((r[i][1] > y) !== (r[j][1] > y) && x < (r[j][0] - r[i][0]) * (y - r[i][1]) / (r[j][1] - r[i][1]) + r[i][0]) c = !c; } return c; };
@@ -532,7 +537,8 @@ details > *:not(summary) { margin-top: 8px; }
       const [p, q] = [proj(b0 - 0.2, b1 - 0.3), proj(b2 + 0.2, b3 + 0.3)];
       const big = [[[p[0], p[1]], [q[0], p[1]], [q[0], q[1]], [p[0], q[1]], [p[0], p[1]]]];
       let mask = [big];
-      try { if (alive.length) mask = pc.difference(big, pc.union(...alive.map((s) => s.rem))); } catch (e) { console.warn(e); }
+      try { if (alive.length) mask = pc.difference(big, pc.union(...alive.map((s) => s.rem))); }
+      catch (e) { try { mask = pc.difference(big, pc.union(...alive.map((s) => snapMulti(s.rem)))); } catch (e2) { console.warn(e2); } } // retry on a 1 cm grid: polygon-clipping can trip over near-identical edges
       L.polygon(toLL(mask), { pane: "mask", stroke: false, fillColor: "#2a2f3a", fillOpacity: 0.38, interactive: false }).addTo(maskLayer);
     }
     // station markers
@@ -828,6 +834,117 @@ details > *:not(summary) { margin-top: 8px; }
   // ===== end: measure-thames =====
 
   // ===== feature: measure-station =====
+  // Measuring: "Compared to me, are you closer to or further from a rail station?"
+  // d = distance from the seekers' point to the nearest station in the chosen set.
+  // Closer keeps everywhere within d of any station in the set; Further rules that out.
+  // Data: data/measure-station-rail.json, baked from OpenStreetMap (railway=station and rail
+  // public_transport=station, heritage, disused, miniature and planned stations left out, same-name
+  // stations merged), © OpenStreetMap contributors, ODbL. Rows are [name, lat, lon, modes], where modes
+  // has letters u Tube, r National Rail, o Overground, e Elizabeth line, d DLR.
+  {
+    const MS_T = "measure-station", MS_MIN = 25, MS_N = 48;
+    const MS_SETS = { rail: "All rail stations", tube: "Tube stations" };
+    const MS_FAR = [[boxRing(9e5, 9e5, 9e5 + 10, 9e5 + 10)]]; // a speck far away: "no station near any zone"
+    let msData = null, msFail = false, msSet = "rail";
+    const msPtCache = {};
+    map.attributionControl.addAttribution("Rail stations: &copy; OpenStreetMap contributors (ODbL)");
+    const msNorm = (n) => n.toLowerCase().replace(/^london /, "").replace(/\bst\.? /g, "st ").replace(/&/g, "and").replace(/\(.*?\)/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+    // Station points for a set: the app's own Tube stations, plus the baked stations that aren't one of them.
+    function msPoints(set) {
+      if (!msData) return null;
+      if (msPtCache[set]) return msPtCache[set];
+      const pts = stations.map((s) => ({ n: s.n, lat: s.lat, lon: s.lon, xy: s.xy, m: "u" }));
+      for (const [n, lat, lon, m] of msData.stations) {
+        if (set === "tube" && !m.includes("u")) continue;
+        const xy = proj(lat, lon), k = msNorm(n);
+        const dup = stations.some((s) => { const dd = Math.hypot(s.xy[0] - xy[0], s.xy[1] - xy[1]); return dd < 100 || (dd < 400 && m === "u" && msNorm(s.n) === k); });
+        if (!dup) pts.push({ n, lat, lon, xy, m });
+      }
+      return (msPtCache[set] = pts);
+    }
+    function msNearest(ll, set) {
+      const pts = msPoints(set); if (!pts) return null;
+      const p = proj(ll[0], ll[1]);
+      let best = null, bd = Infinity;
+      for (const q of pts) { const d = Math.hypot(q.xy[0] - p[0], q.xy[1] - p[1]); if (d < bd) { bd = d; best = q; } }
+      return best && { s: best, d: bd };
+    }
+    // Union of circles of radius r around the stations that could touch a hiding zone.
+    function msBuffer(set, r) {
+      const pts = msPoints(set); if (!pts) return null;
+      const near = pts.filter((q) => stations.some((s) => Math.hypot(s.xy[0] - q.xy[0], s.xy[1] - q.xy[1]) < r + ZONE_R + 5));
+      return near.length ? bufferPoints(near.map((q) => q.xy), r, MS_N) : MS_FAR;
+    }
+    // Closer: circles drawn just outside the true circle (and never under MS_MIN), so we never cut off a real spot.
+    // Further: circles drawn just inside it, for the same reason.
+    const msRadius = (c) => c.ans === "closer" ? Math.max(c.d, MS_MIN) / Math.cos(Math.PI / MS_N) : c.d;
+    const msLoad = () => {
+      msFail = false;
+      loadJSON("data/measure-station-rail.json").then((j) => { msData = j; render(); drawDraft(); syncPanels(); })
+        .catch(() => { msFail = true; syncPanels(); });
+    };
+    msLoad();
+
+    QTYPES[MS_T] = {
+      region(c) { return c.d > 0 || c.ans === "closer" ? msBuffer(c.set, msRadius(c)) : MS_FAR; },
+      keeps: (c) => c.ans === "closer",
+      describe: (c) => ({ t: `Measure ${c.set === "tube" ? "Tube" : "rail"} station: seekers ${fmtD(c.d)} from ${c.near}`, a: c.ans === "closer" ? "Closer" : "Further", ok: c.ans === "closer" }),
+      outline(c, st, layer) { const g = regionFor(c); if (g && g !== MS_FAR) L.polygon(toLL(g), st).addTo(layer); },
+      points: msPoints,
+    };
+
+    const el = addSubject("measure", "rail", "Rail station");
+    el.innerHTML = `<div class="chips ms-sets">${Object.entries(MS_SETS).map(([k, v]) => `<button type="button" data-set="${k}">${v}</button>`).join("")}</div>
+      <p class="hint ms-info"></p>
+      <p class="hint ms-set-hint"></p>
+      <div class="row ms-retry" hidden><button type="button">Try loading again</button></div>
+      <div class="answers"><button type="button" class="yes ms-closer" disabled>Closer</button><button type="button" class="no ms-further" disabled>Further</button></div>`;
+    const q = (s) => el.querySelector(s);
+    q(".ms-sets").addEventListener("click", (e) => { const b = e.target.closest("button[data-set]"); if (!b) return; msSet = b.dataset.set; drawDraft(); syncPanels(); });
+    q(".ms-retry button").onclick = () => { msLoad(); syncPanels(); };
+    const msAdd = (ans) => {
+      const n = draft.askC && msNearest(draft.askC, msSet); if (!n) return;
+      add({ type: MS_T, c: draft.askC.slice(), set: msSet, d: Math.round(n.d * 10) / 10, near: n.s.n, ans });
+      drawDraft(); syncPanels();
+    };
+    q(".ms-closer").onclick = () => msAdd("closer");
+    q(".ms-further").onclick = () => msAdd("further");
+
+    hooks.sync.push(() => {
+      el.querySelectorAll(".ms-sets button").forEach((b) => b.classList.toggle("on", b.dataset.set === msSet));
+      q(".ms-set-hint").textContent = msSet === "rail" ? "Counts Tube, National Rail, Overground, Elizabeth line and DLR stations, including ones just outside Zone 1. Distances are to each station's map point." : "Counts Tube stations only, including ones just outside Zone 1. Distances are to each station's map point.";
+      q(".ms-retry").hidden = !msFail;
+      const n = draft.askC && msNearest(draft.askC, msSet);
+      const info = q(".ms-info");
+      if (msFail) info.textContent = "Couldn't load the station list. Check your connection and try again.";
+      else if (!msData) info.textContent = "Loading stations…";
+      else if (!n) info.textContent = "Set where you are asking from to measure to your nearest station.";
+      else {
+        const d = fmtDual(n.d), lead = `Your nearest is ${n.s.n}, ${d} away.`;
+        info.textContent = n.d < MS_MIN
+          ? `${lead} You're at a station, so “closer” would mean they're at one too. Closer keeps ${MS_MIN} m around every station to allow for GPS error.`
+          : `${lead} Closer keeps everywhere within ${fmtD(n.d)} of a station; further rules it out.`;
+      }
+      q(".ms-closer").disabled = q(".ms-further").disabled = !n;
+      q(".ms-closer").textContent = n ? `Closer than ${fmtD(n.d)}` : "Closer";
+      q(".ms-further").textContent = n ? `Further than ${fmtD(n.d)}` : "Further";
+    });
+
+    // Preview: dashed circle of radius d around the seekers, the nearest station, and (faintly) the area "closer" would keep.
+    let msPrev = { key: null, g: null };
+    hooks.draft.push((tab, layer) => {
+      if (!subjectOn("measure", "rail") || !draft.askC) return;
+      const n = msNearest(draft.askC, msSet); if (!n) return;
+      const pane = "draft", ll = [n.s.lat, n.s.lon];
+      const key = `${msSet}|${draft.askC.join(",")}`;
+      if (msPrev.key !== key) { let g = null; try { g = n.d >= 1 ? msBuffer(msSet, n.d) : null; } catch (e) { console.warn(e); } msPrev = { key, g: g === MS_FAR ? null : g }; }
+      if (msPrev.g) L.polygon(toLL(msPrev.g), { pane, color: "#1d3f94", weight: 1, opacity: 0.45, fillColor: "#1d3f94", fillOpacity: 0.07, interactive: false }).addTo(layer);
+      if (n.d >= 1) L.circle(draft.askC, { pane, radius: n.d, color: "#1d3f94", weight: 2, dashArray: "6 6", fill: false, interactive: false }).addTo(layer);
+      L.polyline([draft.askC, ll], { pane, color: "#1d3f94", weight: 2, opacity: 0.8, interactive: false }).addTo(layer);
+      L.circleMarker(ll, { pane, radius: 7, color: "#1d3f94", weight: 3, fillColor: "#fff", fillOpacity: 1, interactive: false })
+        .bindTooltip(n.s.n, { permanent: true, direction: "top", offset: [0, -8], className: "ms-near" }).addTo(layer);
+    });
+  }
   // ===== end: measure-station =====
 
   // ===== feature: poi =====
