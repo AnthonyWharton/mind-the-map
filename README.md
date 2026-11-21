@@ -7,7 +7,7 @@ It shows every Zone 1 tube station with its 500 m hiding zone, and gives seekers
 - **Radar**: "are you within X of me?" (0.5, 1, 2, 5, 10, 15, 40, 80 or 160 km, or any distance) from your GPS position or any point
 - **Thermometer**: hotter or colder after moving from A to B, with progress towards 1 km and 5 km
 - **Match**: "is your nearest ___ the same as mine?" for Tube line, station name length, river side (north/south), borough, ward, and parks, zoos, museums, cinemas, hospitals, libraries and consulates
-- **Measure**: "are you closer to or further from ___ than me?" for the Thames (optionally lakes, canals and docks), National Rail stations (or all rail or Tube stations), the river and borough borders, and the same places
+- **Measure**: "are you closer to or further from ___ than me?" for the Thames (optionally lakes, canals and docks), National Rail stations (or all rail or Tube stations), the river and borough borders, sea level (is the hider's ground lower or higher than yours), and the same places
 - **Draw**: outline any area and say whether the hider is inside or outside it (for photos and anything else)
 - **Stations**: rule individual stations out by hand, and open any station in Google Maps
 
@@ -24,6 +24,7 @@ Data for the newer questions is pre-built into `data/`:
 - `admin-divisions.json`: wards and boroughs from the ONS Open Geography Portal (Open Government Licence)
 - `measure-thames-water.json`, `measure-station-rail.json`, `poi-places.json`: water, rail stations and places from OpenStreetMap (ODbL); `poi-build/` rebuilds the places
 - `match-name-stations.json`: Zone 2 stations near Zone 1, from the same TfL data
+- `measure-sea-level.json`: ground height on a 25 m grid (lowest and highest point per cell) from AWS Terrain Tiles, which over London come from the Environment Agency's 2 m LIDAR composite DTM (Open Government Licence); `sea-level-build/` rebuilds it
 
 The layers menu (top right) sets station names to Auto (shown once zoomed in), On or Off, and shows a key to the Tube line colours. Map credits sit behind the small "© OSM" tag in the corner.
 
