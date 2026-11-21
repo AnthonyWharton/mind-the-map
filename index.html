@@ -105,8 +105,13 @@ details > *:not(summary) { margin-top: 8px; }
 .pop .sub { margin-bottom: 8px; }
 .pop .acts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .pop .acts button { padding: 7px 8px; font-size: 13px; }
-.pop .maps-link { display: inline-block; margin-top: 8px; }
 .leaflet-container { font-family: var(--font-body); }
+/* Credits: one line on small screens, tap to read them all. */
+@media (max-width: 640px) {
+  .leaflet-control-attribution { max-width: calc(100vw - 20px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  .leaflet-control-attribution.open { white-space: normal; }
+}
+.pop .maps-link { display: inline-block; margin-top: 8px; }
 .chips.subj button.on { background: var(--accent); border-color: var(--accent); }
 .subj-body { display: flex; flex-direction: column; gap: 10px; }
 .subj-body > div[hidden] { display: none; }
@@ -279,6 +284,25 @@ details > *:not(summary) { margin-top: 8px; }
 (async function () {
   const $ = (s) => document.querySelector(s);
   const pc = window.polygonClipping;
+  // polygon-clipping 0.15 sometimes throws ("Unable to find segment…", "Unable to complete output ring…") on
+  // near-coincident edges, e.g. in render()'s mask union once regions with many vertices are in play (about 1 in 10
+  // border-measuring answers in testing). Retrying with every coordinate snapped to a 1 µm grid fixed every failure
+  // seen. This only changes behaviour after a throw.
+  if (!pc.__retry) {
+    const sn = (g) => (m) => Array.isArray(m[0]) && Array.isArray(m[0][0]) && Array.isArray(m[0][0][0])
+      ? m.map((poly) => poly.map((ring) => ring.map(([x, y]) => [Math.round(x / g) * g, Math.round(y / g) * g])))
+      : m.map((ring) => ring.map(([x, y]) => [Math.round(x / g) * g, Math.round(y / g) * g]));
+    for (const op of ["union", "intersection", "difference", "xor"]) {
+      const f = pc[op];
+      pc[op] = (...args) => {
+        try { return f(...args); } catch (e) {
+          for (const g of [1e-6, 1e-4, 1e-2]) { try { return f(...args.map(sn(g))); } catch (e2) {} }
+          throw e;
+        }
+      };
+    }
+    pc.__retry = true;
+  }
   const STORE = "z1seek.v1";
   let ZONE_R = 500; // hiding zone radius in metres; the Game tab can change it (see applyZone)
 
@@ -329,19 +353,11 @@ details > *:not(summary) { margin-top: 8px; }
     }
     return ring;
   }
-  // Everything within r metres of a projected polyline, as a multipolygon (union of capsules).
-  function bufferLine(line, r, n = 24) {
-    const parts = line.map(([x, y]) => [circleRing(x, y, r, n)]);
-    for (let i = 1; i < line.length; i++) {
-      const [ax, ay] = line[i - 1], [bx, by] = line[i], d = Math.hypot(bx - ax, by - ay);
-      if (!d) continue;
-      const ox = -(by - ay) / d * r, oy = (bx - ax) / d * r;
-      parts.push([[[ax + ox, ay + oy], [bx + ox, by + oy], [bx - ox, by - oy], [ax - ox, ay - oy], [ax + ox, ay + oy]]]);
-    }
-    return pc.union(...parts);
-  }
   // Everything within r metres of any of the projected points, as a multipolygon.
   const bufferPoints = (pts, r, n = 48) => pc.union(...pts.map(([x, y]) => [circleRing(x, y, r, n)]));
+  // Google Maps link for a place: by Place ID when known, otherwise by name near its coordinates.
+  const mapsUrl = (name, lat, lon, placeId) => `https://www.google.com/maps/search/?${new URLSearchParams(placeId ? { api: "1", query: name, query_place_id: placeId } : { api: "1", query: `${lat.toFixed(6)},${lon.toFixed(6)}` })}`;
+  const mapsLink = (name, lat, lon, placeId, text = "Open in Google Maps") => `<a class="maps-link" href="${esc(mapsUrl(name, lat, lon, placeId))}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`;
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
   // ---------- data ----------
@@ -495,6 +511,7 @@ details > *:not(summary) { margin-top: 8px; }
   const map = L.map("map", { preferCanvas: true, zoomControl: false, minZoom: 11, maxZoom: 18, maxBounds: [[b0 - 0.05, b1 - 0.08], [b2 + 0.05, b3 + 0.08]], attributionControl: true });
   map.attributionControl.setPrefix(false).addAttribution("Network &amp; fare zones: TfL open data via Oliver O'Brien").addAttribution("Station coordinates: Google Places");
   L.control.zoom({ position: "topright" }).addTo(map);
+  map.attributionControl.getContainer().addEventListener("click", (e) => { if (e.target.tagName !== "A") e.currentTarget.classList.toggle("open"); });
   const tiles = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -672,7 +689,11 @@ details > *:not(summary) { margin-top: 8px; }
     const active = state.cons.filter((c) => c.on);
     const manual = new Set(active.filter((c) => c.type === "station").map((c) => c.name));
     const filters = active.filter((c) => QTYPES[c.type] && QTYPES[c.type].filter);
-    const regions = active.filter((c) => c.type !== "station" && !filters.includes(c)).map((c) => ({ g: regionFor(c), keep: keepsInside(c) })).filter((r) => r.g);
+    // Each region is split into polygons with bounding boxes, so a zone is only clipped against the parts near it.
+    const bbOf = (ring) => { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const [x, y] of ring) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; } return [x0, y0, x1, y1]; };
+    const asMulti = (g) => !g.length ? [] : typeof g[0][0][0] === "number" ? [g] : g;
+    const regions = active.filter((c) => c.type !== "station" && !filters.includes(c)).map((c) => ({ g: regionFor(c), keep: keepsInside(c) })).filter((r) => r.g)
+      .map((r) => ({ keep: r.keep, polys: asMulti(r.g).filter((p) => p.length && p[0].length).map((p) => ({ p, b: bbOf(p[0]) })) }));
     for (const s of stations) {
       s.why = null;
       if (!state.boundary && s.z !== "1") { s.rem = []; s.frac = 0; s.why = "Zone 1/2 hidden"; continue; }
@@ -680,8 +701,11 @@ details > *:not(summary) { margin-top: 8px; }
       const f = filters.find((c) => !QTYPES[c.type].filter(c, s));
       if (f) { s.rem = []; s.frac = 0; s.why = `Ruled out: ${describe(f).t}`; continue; }
       let m = [[s.ring]];
+      const sb = bbOf(s.ring);
       for (const r of regions) {
-        try { m = r.keep ? pc.intersection(m, r.g) : pc.difference(m, r.g); } catch (e) { console.warn("clip failed", e); }
+        const near = r.polys.filter(({ b }) => b[0] <= sb[2] && b[2] >= sb[0] && b[1] <= sb[3] && b[3] >= sb[1]).map(({ p }) => p);
+        if (!near.length) { if (r.keep) { m = []; break; } continue; }
+        try { m = r.keep ? pc.intersection(m, near) : pc.difference(m, near); } catch (e) { console.warn("clip failed", e); }
         if (!m.length) break;
       }
       const a = m.length ? multiArea(m) : 0;
@@ -786,8 +810,6 @@ details > *:not(summary) { margin-top: 8px; }
     if (pick) { setPoint([s.lat, s.lon]); return; }
     const manual = state.cons.find((c) => c.on && stationRuleMatches(c, s));
     const status = s.frac > 0 ? `${Math.round(s.frac * 100)}% of its zone still possible` : (s.why || "Eliminated");
-    const placeId = s.placeId;
-    const mapsUrl = placeId && `https://www.google.com/maps/search/?${new URLSearchParams({ api: "1", query: `${s.n} Underground station, London`, query_place_id: placeId })}`;
     const html = `<div class="pop"><h3>${esc(s.n)}</h3><div class="sub">Zone ${esc(s.z)} · ${esc(s.l.join(", "))}<br>${esc(status)}</div>
       <div class="acts">
         <button type="button" data-act="radar">Radar from here</button>
@@ -795,7 +817,7 @@ details > *:not(summary) { margin-top: 8px; }
         <button type="button" data-act="ta">Thermometer A</button>
         <button type="button" data-act="tb">Thermometer B</button>
       </div>
-      ${mapsUrl ? `<a class="maps-link" href="${esc(mapsUrl)}" target="_blank" rel="noopener noreferrer">Open in Google Maps</a>` : ""}
+      ${mapsLink(`${s.n.replace(/ \(.*\)$/, "")} Underground station, London`, s.lat, s.lon, s.placeId)}
     </div>`;
     const pop = L.popup({ maxWidth: 260 }).setLatLng([s.lat, s.lon]).setContent(html).openOn(map);
     const el = pop.getElement();
@@ -1128,11 +1150,8 @@ details > *:not(summary) { margin-top: 8px; }
   hdr.title = "Hiding time left"; hdr.onclick = () => showTab("game");
   $("#count").before(hdr);
 
-  // The shared toast always offers Undo (of the last answer); hide it while one of our messages shows.
-  let gsMsg = null;
-  const undoBtn = $("#t-undo");
-  new MutationObserver(() => { undoBtn.hidden = $("#t-text").textContent === gsMsg; }).observe($("#t-text"), { childList: true, characterData: true, subtree: true });
-  function gsToast(msg) { gsMsg = msg; toast(msg); undoBtn.hidden = true; }
+  // toast() only offers Undo when asked to (after an answer), so our messages never show it.
+  const gsToast = (msg) => toast(msg);
 
   function cue() {
     gsToast("Time’s up. Seekers, go!");
@@ -1537,10 +1556,10 @@ details > *:not(summary) { margin-top: 8px; }
   // those can be nearer to the edge of a hiding zone than any Zone 1 station. That file is baked from the same TfL
   // open data (via Oliver O'Brien, Open Government Licence) as the main station list, which is already credited.
   (() => {
-    // Count letters A–Z only. The app's own "Edgware Road (…)" suffixes are dropped. Any other bracketed part, such
+    // Count letters A–Z only. The app's own "Edgware Road (…)" and "Paddington (…)" suffixes are dropped. Any other bracketed part, such
     // as "Kensington (Olympia)", is ambiguous, so both counts stay possible.
     const letters = (s) => (s.normalize("NFD").match(/[A-Za-z]/g) || []).length;
-    const baseName = (n) => (/^Edgware Road \(/.test(n) ? "Edgware Road" : n);
+    const baseName = (n) => (/^(Edgware Road|Paddington) \(/.test(n) ? n.replace(/ \(.*$/, "") : n);
     function lengthsOf(n) {
       const b = baseName(n), m = b.match(/^(.*?)\s*\(.*\)\s*$/);
       const out = [letters(b)];
@@ -1700,25 +1719,6 @@ details > *:not(summary) { margin-top: 8px; }
   // North/south is derived from the boroughs: every borough in the clip box is wholly on one side, so the
   // river border is the borough boundary down the middle of the river. Only borders inside the clip box
   // count (the out-of-bounds rule); the clip box's own edges are never borders.
-  // polygon-clipping 0.15 sometimes throws ("Unable to find segment…", "Unable to complete output ring…") on
-  // near-coincident edges, e.g. in render()'s mask union once regions with many vertices are in play (about 1 in 10
-  // border-measuring answers in testing). Retrying with every coordinate snapped to a 1 µm grid fixed every failure
-  // seen. This only changes behaviour after a throw. (Cross-cutting: it could move to the shared geometry code.)
-  if (!pc.__retry) {
-    const sn = (g) => (m) => Array.isArray(m[0]) && Array.isArray(m[0][0]) && Array.isArray(m[0][0][0])
-      ? m.map((poly) => poly.map((ring) => ring.map(([x, y]) => [Math.round(x / g) * g, Math.round(y / g) * g])))
-      : m.map((ring) => ring.map(([x, y]) => [Math.round(x / g) * g, Math.round(y / g) * g]));
-    for (const op of ["union", "intersection", "difference", "xor"]) {
-      const f = pc[op];
-      pc[op] = (...args) => {
-        try { return f(...args); } catch (e) {
-          for (const g of [1e-6, 1e-4, 1e-2]) { try { return f(...args.map(sn(g))); } catch (e2) {} }
-          throw e;
-        }
-      };
-    }
-    pc.__retry = true;
-  }
   {
     map.attributionControl.addAttribution('Boundaries: contains National Statistics and OS data © Crown copyright and database right (<a href="https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/">OGL</a>)');
     const URL_ = "data/admin-divisions.json";
@@ -2288,7 +2288,7 @@ details > *:not(summary) { margin-top: 8px; }
     function msPoints(set) {
       if (!msData) return null;
       if (msPtCache[set]) return msPtCache[set];
-      const pts = stations.map((s) => ({ n: s.n, lat: s.lat, lon: s.lon, xy: s.xy, m: "u" }));
+      const pts = stations.map((s) => ({ n: s.n, lat: s.lat, lon: s.lon, xy: s.xy, m: "u", placeId: s.placeId }));
       for (const [n, lat, lon, m] of msData.stations) {
         if (set === "tube" && !m.includes("u")) continue;
         const xy = proj(lat, lon), k = msNorm(n);
@@ -2356,9 +2356,9 @@ details > *:not(summary) { margin-top: 8px; }
       else if (!n) info.textContent = "Set where you are asking from to measure to your nearest station.";
       else {
         const d = fmtDual(n.d), lead = `Your nearest is ${n.s.n}, ${d} away.`;
-        info.textContent = n.d < MS_MIN
+        info.innerHTML = esc(n.d < MS_MIN
           ? `${lead} You're at a station, so “closer” would mean they're at one too. Closer keeps ${MS_MIN} m around every station to allow for GPS error.`
-          : `${lead} Closer keeps everywhere within ${fmtD(n.d)} of a station; further rules it out.`;
+          : `${lead} Closer keeps everywhere within ${fmtD(n.d)} of a station; further rules it out.`) + " " + mapsLink(n.s.placeId ? `${n.s.n.replace(/ \(.*\)$/, "")} station, London` : n.s.n, n.s.lat, n.s.lon, n.s.placeId, `${n.s.n} in Google Maps`);
       }
       q(".ms-closer").disabled = q(".ms-further").disabled = !n;
       q(".ms-closer").textContent = n ? `Closer than ${fmtD(n.d)}` : "Closer";
