@@ -105,6 +105,7 @@ details > *:not(summary) { margin-top: 8px; }
 .pop .sub { margin-bottom: 8px; }
 .pop .acts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .pop .acts button { padding: 7px 8px; font-size: 13px; }
+.pop .maps-link { display: inline-block; margin-top: 8px; }
 .leaflet-container { font-family: var(--font-body); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
@@ -210,6 +211,75 @@ details > *:not(summary) { margin-top: 8px; }
   const COLORS = { "Bakerloo": "B36305", "Central": "E32017", "Circle": "FFD300", "District": "00782A", "Hammersmith & City": "F3A9BB", "Jubilee": "A0A5A9", "Metropolitan": "9B0056", "Northern": "000000", "Piccadilly": "003688", "Victoria": "0098D4", "Waterloo & City": "95CDBA" };
   // The source predates the Northern line extension's rezoning.
   const ZONE_FIX = { "Nine Elms": "1", "Battersea Power Station": "1", "Kennington": "1/2" };
+  // Used for outbound Maps links. Pins and game zones use the TfL coordinates.
+  const GOOGLE_PLACE_IDS = new Map(Object.entries({
+    "Aldgate": "ChIJxx7AWksDdkgRU7ET2gD2t1c",
+    "Aldgate East": "ChIJCSwENLUcdkgRcxY424ZbDSM",
+    "Angel": "ChIJW6zsMkMbdkgRzuXW6seMAtQ",
+    "Baker Street": "ChIJlQh0H88adkgRT1sjAmMXQt4",
+    "Bank": "ChIJTUEYl1QDdkgRYE1YHRnIiFY",
+    "Barbican": "ChIJ1YzjnVYbdkgRKyhyc4zDkcg",
+    "Battersea Power Station": "ChIJv5utaQIFdkgRMK5YyBburCM",
+    "Bayswater": "ChIJKZyRf1UFdkgR3epMaeDsjto",
+    "Blackfriars": "ChIJgWfuuq0EdkgRMx1fYiZTGKE",
+    "Bond Street": "ChIJn8Ps1ywFdkgRJcpkcuK0o0c",
+    "Borough": "ChIJveMeg1gDdkgRXwphFYUtm6g",
+    "Cannon Street": "ChIJ_09VT1QDdkgRyPwk2CL0uSU",
+    "Chancery Lane": "ChIJRSD_d0wbdkgR_P_OkhjyyEM",
+    "Charing Cross": "ChIJra2jTs4EdkgRshPsDJz8OM0",
+    "Covent Garden": "ChIJT2mIkcwEdkgRYspzsBq1iAM",
+    "Earl's Court": "ChIJTYFlZIsPdkgRNvh8Ud9OzLg",
+    "Edgware Road (Bakerloo)": "ChIJN2AzqrYadkgRMtuiUnUghW0",
+    "Edgware Road (Circle/District/H&C)": "ChIJa8XkK7QadkgRHMVnJoLcIeo",
+    "Elephant & Castle": "ChIJI9JoOqIEdkgRm1W33pepbrs",
+    "Embankment": "ChIJ85vnMskEdkgRizGhXNN3k6o",
+    "Euston": "ChIJNVch-SMbdkgRqv1PBlyKQqU",
+    "Euston Square": "ChIJdTDfAiYbdkgRDjpEjH8RSnI",
+    "Farringdon": "ChIJp7R9HVIbdkgRkHSxz54Qxjw",
+    "Gloucester Road": "ChIJY2zjBF4FdkgRBITPvkNYBho",
+    "Goodge Street": "ChIJXS6NpS4bdkgR7_EhEFlacW8",
+    "Great Portland Street": "ChIJkVboC9cadkgRYOzinfJX7Pw",
+    "Green Park": "ChIJQRZgSygFdkgRrZelNQQCpf8",
+    "High Street Kensington": "ChIJgR1T2_YPdkgRox0xsHKJEWQ",
+    "Holborn": "ChIJr11YVTQbdkgRhY0V1HABqq8",
+    "Hyde Park Corner": "ChIJP3ORNSUFdkgRH5WN6MNz4a8",
+    "Kennington": "ChIJl55TqZAEdkgRCqQtpLZu6r0",
+    "King's Cross St Pancras": "ChIJx4FA-TsbdkgR0KLHklorYXw",
+    "Knightsbridge": "ChIJZ6O_CTkFdkgROFMJInuosD8",
+    "Lambeth North": "ChIJvwo7q74EdkgRezYeI2NSMCs",
+    "Lancaster Gate": "ChIJgZ_amk0FdkgRTyJanN2L1wM",
+    "Leicester Square": "ChIJ98Dokc0EdkgRy3-ajwvdD94",
+    "Liverpool Street": "ChIJJ1jodq0cdkgRj7HA-vwxEHs",
+    "London Bridge": "ChIJYc1mdQADdkgR54U5sTM1psA",
+    "Mansion House": "ChIJLw7CfqoEdkgRLl2SJ9DRW-8",
+    "Marble Arch": "ChIJX_jXnjQFdkgRSPraYlz1cmQ",
+    "Marylebone": "ChIJF7F7yskadkgRt_orhoI4_wE",
+    "Monument": "ChIJ64ml6lMDdkgR63qQmSJ5wUM",
+    "Moorgate": "ChIJEWNLkKscdkgRaKnhSHUvRNo",
+    "Nine Elms": "ChIJxb9PmvAEdkgRcPtq-xeSQAQ",
+    "Notting Hill Gate": "ChIJAZ58j_sPdkgRCy7yBmysnHA",
+    "Old Street": "ChIJzREMBKYcdkgRT9taU6biunM",
+    "Oxford Circus": "ChIJe9DRTdUadkgRAlFpoUrfj0c",
+    "Paddington": "ChIJpwBVsLIadkgRE767cq0HnXQ",
+    "Piccadilly Circus": "ChIJvVRe4NMEdkgRw3WgQO_J9KM",
+    "Pimlico": "ChIJuWi7o-YEdkgRuUKA7QR2BYU",
+    "Queensway": "ChIJoQGb71UFdkgR80plpHYwwRc",
+    "Regent's Park": "ChIJqSNDLtcadkgR-uG7QjdJuN0",
+    "Russell Square": "ChIJc1H-2DAbdkgREGJoCFlabM8",
+    "Sloane Square": "ChIJX4cORhYFdkgRdaAZPP16Y8w",
+    "South Kensington": "ChIJ91cwg0IFdkgR18p5WmlWiTY",
+    "Southwark": "ChIJGfGBUKUEdkgRSTEeQf5Ux-U",
+    "St James's Park": "ChIJjb5P89sEdkgR6gnY-YukPug",
+    "St Paul's": "ChIJY4RoLasEdkgR5J8vMW-DN1g",
+    "Temple": "ChIJgwqKNbQEdkgRIfMC9qy8GJg",
+    "Tottenham Court Road": "ChIJUwzMay0bdkgR2il_ihMRcME",
+    "Tower Hill": "ChIJYRsYAUwDdkgRWD9yGC0gqek",
+    "Vauxhall": "ChIJ8YCOY-4EdkgR1BkL52PYoQg",
+    "Victoria": "ChIJ1QGgyiEFdkgRYIJN91D0KTI",
+    "Warren Street": "ChIJj-hXfCgbdkgRWewwuunWzdg",
+    "Waterloo": "ChIJF4o0NLgEdkgRjBPR6vZ4dsg",
+    "Westminster": "ChIJ0160ScQEdkgR3zgV673t8yU"
+  }));
   const current = (l) => !l.closed && (l.opened || 0) <= 2026;
   try {
     const [sj, lj] = await Promise.all(["tfl_stations.json", "tfl_lines.json"].map((f) => fetch(SRC + f).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })));
@@ -476,13 +546,17 @@ details > *:not(summary) { margin-top: 8px; }
     if (pick) { setPoint([s.lat, s.lon]); return; }
     const manual = state.cons.find((c) => c.on && c.type === "station" && c.name === s.n);
     const status = s.frac > 0 ? `${Math.round(s.frac * 100)}% of its zone still possible` : (s.why || "Eliminated");
+    const placeId = GOOGLE_PLACE_IDS.get(s.n);
+    const mapsUrl = placeId && `https://www.google.com/maps/search/?${new URLSearchParams({ api: "1", query: `${s.n} Underground station, London`, query_place_id: placeId })}`;
     const html = `<div class="pop"><h3>${esc(s.n)}</h3><div class="sub">Zone ${esc(s.z)} · ${esc(s.l.join(", "))}<br>${esc(status)}</div>
       <div class="acts">
         <button type="button" data-act="radar">Radar from here</button>
         ${manual ? `<button type="button" data-act="restore">Restore station</button>` : `<button type="button" data-act="out" ${s.frac > 0 ? "" : "disabled"}>Rule out station</button>`}
         <button type="button" data-act="ta">Thermometer A</button>
         <button type="button" data-act="tb">Thermometer B</button>
-      </div></div>`;
+      </div>
+      ${mapsUrl ? `<a class="maps-link" href="${esc(mapsUrl)}" target="_blank" rel="noopener noreferrer">Open in Google Maps</a>` : ""}
+    </div>`;
     const pop = L.popup({ maxWidth: 260 }).setLatLng([s.lat, s.lon]).setContent(html).openOn(map);
     const el = pop.getElement();
     el.querySelectorAll("button[data-act]").forEach((b) => b.addEventListener("click", () => {
