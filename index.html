@@ -2207,7 +2207,7 @@ details > *:not(summary) { margin-top: 8px; }
   //          { type: "poi-tentacle", cat, c, r, cands: [[name, lat, lon], ...], place | null, ans: "place" | "none" }
   const POI_MI = 1609.344, POI_TOL = 25, POI_STEP = 60;
   const POI_CATS = {
-    park: { one: "park", many: "parks", note: "Named parks and garden squares of half a hectare or more. Distances are to the park’s edge, so it’s 0 inside a park." },
+    park: { one: "park", many: "parks", note: "Named public parks, commons, gardens, garden squares, churchyards and nature reserves of 0.1 ha or more. Private garden squares and sports grounds don’t count. Distances are to the park’s edge, so it’s 0 inside a park." },
     theme: { one: "amusement park", many: "amusement parks", tent: 15, note: "Theme parks with rides (Chessington, Thorpe Park). Farm parks don’t count. Distances are to the edge of the site." },
     zoo: { one: "zoo", many: "zoos", tent: 15, note: "City farms, petting zoos and park animal enclosures don’t count. Distances are to the edge of the site." },
     aquarium: { one: "aquarium", many: "aquariums", tent: 15, note: "Distances are to the aquarium’s centre point." },
