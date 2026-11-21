@@ -106,6 +106,33 @@ details > *:not(summary) { margin-top: 8px; }
 .pop .acts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .pop .acts button { padding: 7px 8px; font-size: 13px; }
 .leaflet-container { font-family: var(--font-body); }
+.chips.subj button.on { background: var(--accent); border-color: var(--accent); }
+.subj-body { display: flex; flex-direction: column; gap: 10px; }
+.subj-body > div[hidden] { display: none; }
+.subj-body > div { display: flex; flex-direction: column; gap: 10px; }
+/* ===== feature css: game-settings ===== */
+/* ===== end css: game-settings ===== */
+
+/* ===== feature css: match-line ===== */
+/* ===== end css: match-line ===== */
+
+/* ===== feature css: match-name ===== */
+/* ===== end css: match-name ===== */
+
+/* ===== feature css: admin ===== */
+/* ===== end css: admin ===== */
+
+/* ===== feature css: measure-thames ===== */
+/* ===== end css: measure-thames ===== */
+
+/* ===== feature css: measure-station ===== */
+/* ===== end css: measure-station ===== */
+
+/* ===== feature css: poi ===== */
+/* ===== end css: poi ===== */
+
+/* ===== feature css: gps ===== */
+/* ===== end css: gps ===== */
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 </head>
@@ -124,9 +151,13 @@ details > *:not(summary) { margin-top: 8px; }
     <nav class="tabs" role="tablist">
       <button type="button" data-tab="radar" class="on">Radar</button>
       <button type="button" data-tab="thermo">Thermo</button>
+      <button type="button" data-tab="match">Match</button>
+      <button type="button" data-tab="measure">Measure</button>
+      <button type="button" data-tab="tentacles">Tentacles</button>
       <button type="button" data-tab="draw">Draw</button>
       <button type="button" data-tab="stations">Stations</button>
       <button type="button" data-tab="log">Log <span id="logn"></span></button>
+      <button type="button" data-tab="game">Game</button>
       <button type="button" id="collapse" aria-expanded="true">Hide ▾</button>
     </nav>
     <div class="panels">
@@ -152,6 +183,27 @@ details > *:not(summary) { margin-top: 8px; }
         <p class="hint" id="t-info">Set A with GPS when you start moving, travel, then set B with GPS where you stop. The line halfway between them splits the map.</p>
         <div class="answers"><button type="button" class="yes" id="t-hot" disabled>Hotter (nearer B)</button><button type="button" class="no" id="t-cold" disabled>Colder (nearer A)</button></div>
       </div>
+      <div class="panel" id="p-match">
+        <div class="row"><button type="button" class="pt ask-gps">Use my GPS</button><button type="button" class="pt ask-pick">Pick on map</button></div>
+        <p class="hint ask-where">Set where you are asking from.</p>
+        <p class="hint">“Is your nearest ___ the same as mine?”</p>
+        <div class="chips subj" data-for="match"></div>
+        <div class="subj-body" data-for="match"></div>
+      </div>
+      <div class="panel" id="p-measure">
+        <div class="row"><button type="button" class="pt ask-gps">Use my GPS</button><button type="button" class="pt ask-pick">Pick on map</button></div>
+        <p class="hint ask-where">Set where you are asking from.</p>
+        <p class="hint">“Compared to me, are you closer to or further from ___?”</p>
+        <div class="chips subj" data-for="measure"></div>
+        <div class="subj-body" data-for="measure"></div>
+      </div>
+      <div class="panel" id="p-tentacles">
+        <div class="row"><button type="button" class="pt ask-gps">Use my GPS</button><button type="button" class="pt ask-pick">Pick on map</button></div>
+        <p class="hint ask-where">Set where you are asking from.</p>
+        <p class="hint">“Of all the ___ within this distance of me, which are you nearest to?”</p>
+        <div class="chips subj" data-for="tentacles"></div>
+        <div class="subj-body" data-for="tentacles"></div>
+      </div>
       <div class="panel" id="p-draw">
         <p class="hint">Outline an area by tapping its corners on the map. Use it for matching, measuring, photo or any answer that splits the map.</p>
         <div class="row"><button type="button" class="pt" id="d-start">Start outline</button><button type="button" id="d-undo" disabled>Undo corner</button><button type="button" id="d-clear" disabled>Clear</button></div>
@@ -173,6 +225,7 @@ details > *:not(summary) { margin-top: 8px; }
           <p class="hint" id="l-msg"></p>
         </details>
       </div>
+      <div class="panel" id="p-game"></div>
     </div>
   </section>
 </div>
@@ -201,6 +254,48 @@ details > *:not(summary) { margin-top: 8px; }
   const toLL = (m) => m.map((poly) => poly.map((ring) => ring.map(([x, y]) => unproj(x, y))));
   const fmtD = (m) => m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(m < 10000 ? 2 : 1).replace(/\.?0+$/, "")} km`;
   const fmtDual = (m) => `${fmtD(m)} (${(m / 1609.344).toFixed(2).replace(/\.?0+$/, "")} mi)`;
+  const pointInRing = ([x, y], r) => { let c = false; for (let i = 0, j = r.length - 1; i < r.length; j = i++) { if ((r[i][1] > y) !== (r[j][1] > y) && x < (r[j][0] - r[i][0]) * (y - r[i][1]) / (r[j][1] - r[i][1]) + r[i][0]) c = !c; } return c; };
+  // Multipolygon in polygon-clipping form: [[outer, hole, ...], ...]
+  const pointInMulti = (pt, m) => m.some((poly) => pointInRing(pt, poly[0]) && !poly.slice(1).some((h) => pointInRing(pt, h)));
+  const segDist = ([px, py], [ax, ay], [bx, by]) => { const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy; let t = L2 ? ((px - ax) * dx + (py - ay) * dy) / L2 : 0; t = Math.max(0, Math.min(1, t)); return Math.hypot(px - ax - t * dx, py - ay - t * dy); };
+  const lineDist = (p, line) => { let d = Infinity; for (let i = 1; i < line.length; i++) d = Math.min(d, segDist(p, line[i - 1], line[i])); return line.length === 1 ? Math.hypot(p[0] - line[0][0], p[1] - line[0][1]) : d; };
+  // Keep the part of a convex ring where nx*x + ny*y <= c (Sutherland–Hodgman).
+  function clipHalf(ring, nx, ny, c) {
+    const out = [], pts = ring.slice(0, -1), f = (p) => nx * p[0] + ny * p[1] - c;
+    for (let i = 0; i < pts.length; i++) {
+      const P = pts[i], Q = pts[(i + 1) % pts.length], fp = f(P), fq = f(Q);
+      if (fp <= 0) out.push(P);
+      if ((fp < 0 && fq > 0) || (fp > 0 && fq < 0)) { const t = fp / (fp - fq); out.push([P[0] + t * (Q[0] - P[0]), P[1] + t * (Q[1] - P[1])]); }
+    }
+    if (out.length) out.push(out[0].slice());
+    return out;
+  }
+  const boxRing = (x0, y0, x1, y1) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]];
+  // Voronoi cell of sites[i] (projected points): the area closer to it than to any other site, clipped to a box of half-size R.
+  function voronoiCell(sites, i, R = 60000) {
+    const [sx, sy] = sites[i];
+    let ring = boxRing(sx - R, sy - R, sx + R, sy + R);
+    for (let j = 0; j < sites.length && ring.length; j++) {
+      if (j === i) continue;
+      const [tx, ty] = sites[j], nx = tx - sx, ny = ty - sy;
+      if (!nx && !ny) continue;
+      ring = clipHalf(ring, nx, ny, (nx * (sx + tx) + ny * (sy + ty)) / 2);
+    }
+    return ring;
+  }
+  // Everything within r metres of a projected polyline, as a multipolygon (union of capsules).
+  function bufferLine(line, r, n = 24) {
+    const parts = line.map(([x, y]) => [circleRing(x, y, r, n)]);
+    for (let i = 1; i < line.length; i++) {
+      const [ax, ay] = line[i - 1], [bx, by] = line[i], d = Math.hypot(bx - ax, by - ay);
+      if (!d) continue;
+      const ox = -(by - ay) / d * r, oy = (bx - ax) / d * r;
+      parts.push([[[ax + ox, ay + oy], [bx + ox, by + oy], [bx - ox, by - oy], [ax - ox, ay - oy], [ax + ox, ay + oy]]]);
+    }
+    return pc.union(...parts);
+  }
+  // Everything within r metres of any of the projected points, as a multipolygon.
+  const bufferPoints = (pts, r, n = 48) => pc.union(...pts.map(([x, y]) => [circleRing(x, y, r, n)]));
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
   // ---------- data ----------
@@ -250,13 +345,25 @@ details > *:not(summary) { margin-top: 8px; }
     return { s: best, d: bd };
   }
   const placeName = (ll) => { const n = nearest(ll); return n.d < 60 ? n.s.n : `near ${n.s.n}`; };
+  // Fetch JSON once per URL. Relative paths load from this site (e.g. "data/boroughs.json").
+  const jsonCache = new Map();
+  const loadJSON = (url) => { if (!jsonCache.has(url)) jsonCache.set(url, fetch(url).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }).catch((e) => { jsonCache.delete(url); throw e; })); return jsonCache.get(url); };
+  // Thames polygons near Zone 1, as projected multipolygon parts ([[outer, holes...], ...]) plus the raw GeoJSON features.
+  let thamesP = null;
+  const loadThames = () => thamesP || (thamesP = loadJSON(SRC + "river_thames_simp.json").then((tj) => {
+    const [a, b, c, d] = D.bbox;
+    const feats = tj.features.filter((f) => f.geometry.coordinates[0].some(([x, y]) => y >= a - 0.05 && y <= c + 0.05 && x >= b - 0.08 && x <= d + 0.08));
+    return { feats, polys: feats.map((f) => f.geometry.coordinates.map((r) => r.map(([x, y]) => proj(y, x)))) };
+  }).catch((e) => { thamesP = null; throw e; }));
 
   // ---------- state ----------
   let state = { cons: [], boundary: true };
   try { const saved = JSON.parse(localStorage.getItem(STORE)); if (saved && Array.isArray(saved.cons)) state = { boundary: true, ...saved }; } catch (e) {}
   const save = () => { try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (e) {} };
-  const draft = { radarC: null, radarM: 1000, ta: null, tb: null, pts: [] };
-  let pick = null; // 'radar' | 'ta' | 'tb' | 'draw'
+  // askC: where the seekers are asking from, shared by the Match, Measure and Tentacles tabs.
+  const draft = { radarC: null, radarM: 1000, ta: null, tb: null, pts: [], askC: null };
+  let pick = null; // 'radar' | 'ta' | 'tb' | 'draw' | 'ask'
+  const ASK_TABS = ["match", "measure", "tentacles"];
 
   // ---------- map ----------
   const [b0, b1, b2, b3] = D.bbox;
@@ -280,11 +387,8 @@ details > *:not(summary) { margin-top: 8px; }
     if (e.layer !== simple || thamesLoaded) return;
     thamesLoaded = true;
     try {
-      const tj = await (await fetch(SRC + "river_thames_simp.json")).json();
-      const [a, b, c, d] = D.bbox;
-      tj.features.forEach((f) => {
-        const ring = f.geometry.coordinates[0];
-        if (!ring.some(([x, y]) => y >= a && y <= c && x >= b && x <= d)) return;
+      const { feats } = await loadThames();
+      feats.forEach((f) => {
         L.polygon(f.geometry.coordinates.map((r) => r.map(([x, y]) => [y, x])), { pane: "base", stroke: false, fillColor: "#a9cbe8", fillOpacity: 1, interactive: false }).addTo(simple);
       });
     } catch (err) { thamesLoaded = false; }
@@ -347,8 +451,29 @@ details > *:not(summary) { margin-top: 8px; }
     useGpsForPick = true; $("#b-text").textContent = "Getting your location…"; startGps(false);
   }
 
+  // ---------- question types registered by feature sections ----------
+  // QTYPES[type] = {
+  //   region(c)    -> projected multipolygon ([[outer, holes...], ...]) or a single polygon ([outer, holes...]);
+  //                   return null if data isn't loaded yet (then call render() once it is).
+  //   keeps(c)     -> true: the hider is inside region; false: the hider is outside it.
+  //   filter(c, s) -> station-level alternative to region: return false to rule out station s (s.n name, s.l lines, s.xy).
+  //   describe(c)  -> { t: log text, a: short answer label, ok: true if it's a "yes/inside" style answer }
+  //   outline(c, style, layer) -> optional: draw a dashed outline of the question on the map.
+  // }
+  // Regions are cached per answer id, so region() can be slow-ish (it only runs once per answer).
+  const QTYPES = {};
+  const regionCache = new Map();
+  const hooks = { sync: [], draft: [] }; // sync: () => update panel UI; draft: (tab, layer) => draw previews
+
   // ---------- constraints ----------
   function regionFor(c) {
+    const q = QTYPES[c.type];
+    if (q && q.region) {
+      if (regionCache.has(c.id)) return regionCache.get(c.id);
+      const g = q.region(c);
+      if (g) regionCache.set(c.id, g);
+      return g;
+    }
     if (c.type === "radar") { const [x, y] = proj(c.c[0], c.c[1]); return [circleRing(x, y, c.r, 128)]; }
     if (c.type === "area") { const ring = c.pts.map((p) => proj(p[0], p[1])); ring.push(ring[0].slice()); return [ring]; }
     if (c.type === "thermo") {
@@ -360,8 +485,9 @@ details > *:not(summary) { margin-top: 8px; }
     }
     return null;
   }
-  const keepsInside = (c) => c.type === "thermo" || c.ans === "in";
+  const keepsInside = (c) => QTYPES[c.type] && QTYPES[c.type].keeps ? QTYPES[c.type].keeps(c) : c.type === "thermo" || c.ans === "in";
   function describe(c) {
+    if (QTYPES[c.type] && QTYPES[c.type].describe) return QTYPES[c.type].describe(c);
     if (c.type === "radar") return { t: `Radar ${fmtD(c.r)} from ${placeName(c.c)}`, a: c.ans === "in" ? "Within" : "Outside", ok: c.ans === "in" };
     if (c.type === "thermo") return { t: `Thermometer ${fmtD(dist(c.a, c.b))}, ${placeName(c.a)} → ${placeName(c.b)}`, a: c.ans === "hotter" ? "Hotter" : "Colder", ok: c.ans === "hotter" };
     if (c.type === "area") return { t: c.note ? `Area: ${c.note}` : `Drawn area (${c.pts.length} corners)`, a: c.ans === "in" ? "Inside" : "Outside", ok: c.ans === "in" };
@@ -372,11 +498,14 @@ details > *:not(summary) { margin-top: 8px; }
   function compute() {
     const active = state.cons.filter((c) => c.on);
     const manual = new Set(active.filter((c) => c.type === "station").map((c) => c.name));
-    const regions = active.filter((c) => c.type !== "station").map((c) => ({ g: regionFor(c), keep: keepsInside(c) }));
+    const filters = active.filter((c) => QTYPES[c.type] && QTYPES[c.type].filter);
+    const regions = active.filter((c) => c.type !== "station" && !filters.includes(c)).map((c) => ({ g: regionFor(c), keep: keepsInside(c) })).filter((r) => r.g);
     for (const s of stations) {
       s.why = null;
       if (!state.boundary && s.z !== "1") { s.rem = []; s.frac = 0; s.why = "Zone 1/2 hidden"; continue; }
       if (manual.has(s.n)) { s.rem = []; s.frac = 0; s.why = "Ruled out by hand"; continue; }
+      const f = filters.find((c) => !QTYPES[c.type].filter(c, s));
+      if (f) { s.rem = []; s.frac = 0; s.why = `Ruled out: ${describe(f).t}`; continue; }
       let m = [[s.ring]];
       for (const r of regions) {
         try { m = r.keep ? pc.intersection(m, r.g) : pc.difference(m, r.g); } catch (e) { console.warn("clip failed", e); }
@@ -420,6 +549,7 @@ details > *:not(summary) { margin-top: 8px; }
       if (c.type === "radar") L.circle(c.c, { ...st, radius: c.r }).addTo(consLayer);
       if (c.type === "area") L.polygon(c.pts, st).addTo(consLayer);
       if (c.type === "thermo") L.polyline(bisector(c.a, c.b, 12000), st).addTo(consLayer);
+      if (QTYPES[c.type] && QTYPES[c.type].outline) QTYPES[c.type].outline(c, st, consLayer);
     });
     renderStations(); renderLog(); save();
   }
@@ -452,7 +582,7 @@ details > *:not(summary) { margin-top: 8px; }
   // ---------- picking points ----------
   function startPick(kind) {
     pick = kind;
-    const msg = { radar: "Use GPS, or tap a station or any spot on the map.", ta: "Start point (A): use GPS or tap the map.", tb: "End point (B): use GPS or tap the map.", draw: "Tap the map to add corners (GPS adds where you are). Tap Done when finished." }[kind];
+    const msg = { radar: "Use GPS, or tap a station or any spot on the map.", ta: "Start point (A): use GPS or tap the map.", tb: "End point (B): use GPS or tap the map.", draw: "Tap the map to add corners (GPS adds where you are). Tap Done when finished.", ask: "Use GPS, or tap a station or any spot on the map." }[kind];
     $("#b-text").textContent = msg;
     $("#b-done").hidden = kind !== "draw";
     $("#banner").hidden = false;
@@ -467,6 +597,7 @@ details > *:not(summary) { margin-top: 8px; }
     if (pick === "radar") { draft.radarC = ll; endPick(); }
     else if (pick === "ta") { draft.ta = ll; endPick(); }
     else if (pick === "tb") { draft.tb = ll; endPick(); }
+    else if (pick === "ask") { draft.askC = ll; endPick(); }
     else if (pick === "draw") { draft.pts.push(ll); $("#b-text").textContent = `${draft.pts.length} corner${draft.pts.length === 1 ? "" : "s"}. Keep tapping, then tap Done.`; }
     drawDraft(); syncPanels();
   }
@@ -513,11 +644,13 @@ details > *:not(summary) { margin-top: 8px; }
         if (dist(draft.ta, draft.tb) > 1) L.polyline(bisector(draft.ta, draft.tb, 12000), { pane: "draft", color: "#1d3f94", weight: 2.5, dashArray: "8 6", interactive: false }).addTo(draftLayer);
       }
     }
+    if (ASK_TABS.includes(tab) && draft.askC) L.marker(draft.askC, { pane: "draft", icon: ptIcon("●"), interactive: false }).addTo(draftLayer);
     if (tab === "draw" && draft.pts.length) {
       const opts = { pane: "draft", color: "#1d3f94", weight: 2.5, fillColor: "#1d3f94", fillOpacity: 0.1, interactive: false };
       (draft.pts.length >= 3 ? L.polygon(draft.pts, opts) : L.polyline(draft.pts, opts)).addTo(draftLayer);
       draft.pts.forEach((p) => L.circleMarker(p, { pane: "draft", radius: 4, color: "#1d3f94", fillColor: "#fff", fillOpacity: 1, weight: 2, interactive: false }).addTo(draftLayer));
     }
+    hooks.draft.forEach((f) => f(tab, draftLayer));
   }
 
   // ---------- panels ----------
@@ -527,7 +660,7 @@ details > *:not(summary) { margin-top: 8px; }
     document.querySelectorAll(".tabs button[data-tab]").forEach((b) => b.classList.toggle("on", b.dataset.tab === t));
     document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("on", p.id === "p-" + t));
     $("#sheet").classList.remove("collapsed"); $("#collapse").textContent = "Hide ▾"; $("#collapse").setAttribute("aria-expanded", "true");
-    if (pick && !((t === "radar" && pick === "radar") || (t === "thermo" && (pick === "ta" || pick === "tb")) || (t === "draw" && pick === "draw"))) endPick();
+    if (pick && !((t === "radar" && pick === "radar") || (t === "thermo" && (pick === "ta" || pick === "tb")) || (t === "draw" && pick === "draw") || (ASK_TABS.includes(t) && pick === "ask"))) endPick();
     drawDraft(); syncPanels();
     setTimeout(() => map.invalidateSize(), 0);
   }
@@ -568,7 +701,32 @@ details > *:not(summary) { margin-top: 8px; }
   $("#d-in").onclick = () => areaAdd("in");
   $("#d-out").onclick = () => areaAdd("out");
 
+  // Ask-from point shared by Match / Measure / Tentacles.
+  document.querySelectorAll(".ask-pick").forEach((b) => { b.onclick = () => startPick("ask"); });
+  document.querySelectorAll(".ask-gps").forEach((b) => { b.onclick = () => { startPick("ask"); usePosition(); }; });
+  // Subjects: each feature adds a chip to a tab with addSubject(tab, key, label) and fills the element it returns.
+  const subjSel = {};
+  function addSubject(tab, key, label) {
+    const chips = document.querySelector(`.chips.subj[data-for="${tab}"]`), body = document.querySelector(`.subj-body[data-for="${tab}"]`);
+    const chip = document.createElement("button"); chip.type = "button"; chip.textContent = label; chip.dataset.key = key;
+    const el = document.createElement("div"); el.dataset.key = key;
+    chips.appendChild(chip); body.appendChild(el);
+    chip.onclick = () => selectSubject(tab, key);
+    if (!subjSel[tab]) selectSubject(tab, key); else el.hidden = true;
+    return el;
+  }
+  function selectSubject(tab, key) {
+    subjSel[tab] = key;
+    document.querySelectorAll(`.chips.subj[data-for="${tab}"] button`).forEach((b) => b.classList.toggle("on", b.dataset.key === key));
+    document.querySelectorAll(`.subj-body[data-for="${tab}"] > div`).forEach((d) => { d.hidden = d.dataset.key !== key; });
+    drawDraft(); syncPanels();
+  }
+  const subjectOn = (tab, key) => currentTab === tab && subjSel[tab] === key;
+
   function syncPanels() {
+    // ask-from
+    document.querySelectorAll(".ask-pick").forEach((b) => b.classList.toggle("set", pick === "ask"));
+    document.querySelectorAll(".ask-where").forEach((p) => { p.textContent = draft.askC ? `Asking from ${placeName(draft.askC)}` : "Set where you are asking from."; });
     // radar
     const m = radarMetres();
     document.querySelectorAll("#r-chips button").forEach((b) => b.classList.toggle("on", !$("#r-custom").value && Math.abs(parseFloat(b.dataset.m) - draft.radarM) < 0.01));
@@ -588,6 +746,7 @@ details > *:not(summary) { margin-top: 8px; }
     $("#d-start").textContent = pick === "draw" ? "Adding corners…" : draft.pts.length ? "Add more corners" : "Start outline";
     $("#d-undo").disabled = $("#d-clear").disabled = !draft.pts.length;
     $("#d-in").disabled = $("#d-out").disabled = draft.pts.length < 3;
+    hooks.sync.forEach((f) => f());
   }
 
   // stations list
@@ -635,7 +794,7 @@ details > *:not(summary) { margin-top: 8px; }
   $("#l-reset").onclick = () => {
     if (!resetArmed) { resetArmed = true; $("#l-reset").textContent = "Tap again to clear everything"; setTimeout(() => { resetArmed = false; $("#l-reset").textContent = "Reset game"; }, 4000); return; }
     resetArmed = false; $("#l-reset").textContent = "Reset game";
-    state = { cons: [], boundary: true }; $("#s-boundary").checked = true; draft.radarC = draft.ta = draft.tb = null; draft.pts = [];
+    state = { cons: [], boundary: true }; $("#s-boundary").checked = true; draft.radarC = draft.ta = draft.tb = draft.askC = null; draft.pts = [];
     drawDraft(); syncPanels(); render();
   };
   const encode = () => btoa(unescape(encodeURIComponent(JSON.stringify(state))));
@@ -653,8 +812,32 @@ details > *:not(summary) { margin-top: 8px; }
     } catch (e) { $("#l-msg").textContent = "That code didn't work. Check you copied all of it."; }
   };
 
+  // ===== feature: game-settings =====
+  // ===== end: game-settings =====
+
+  // ===== feature: match-line =====
+  // ===== end: match-line =====
+
+  // ===== feature: match-name =====
+  // ===== end: match-name =====
+
+  // ===== feature: admin =====
+  // ===== end: admin =====
+
+  // ===== feature: measure-thames =====
+  // ===== end: measure-thames =====
+
+  // ===== feature: measure-station =====
+  // ===== end: measure-station =====
+
+  // ===== feature: poi =====
+  // ===== end: poi =====
+
+  // ===== feature: gps =====
+  // ===== end: gps =====
+
   render(); syncPanels(); drawDraft();
-  window.__app = { state, stations, add, render, draft, setPoint, startPick, getState: () => state };
+  window.__app = { state, stations, add, render, draft, setPoint, startPick, showTab, selectSubject, QTYPES, proj, unproj, getState: () => state };
 })();
 </script>
 </body>
