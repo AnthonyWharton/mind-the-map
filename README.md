@@ -17,4 +17,4 @@ Live at **https://mindthemap.wharton.dev/** (served over HTTPS, which phones nee
 
 A single static `index.html`, no build step. Leaflet and polygon-clipping load from jsDelivr with pinned versions and integrity hashes. Station and line data load at startup from Oliver O'Brien's compilation of TfL open data, pinned to one commit, with the Northern line extension zones corrected.
 
-Street map © OpenStreetMap contributors © CARTO.
+Street map © OpenStreetMap contributors.
