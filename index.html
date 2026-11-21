@@ -140,6 +140,11 @@ details > *:not(summary) { margin-top: 8px; }
 /* ===== end css: match-line ===== */
 
 /* ===== feature css: match-name ===== */
+.mn-st { color: var(--ink); font-size: 15px; }
+.mn-st b { font-family: var(--font-display); font-weight: 700; font-size: 17px; }
+.mn-n { display: inline-block; min-width: 26px; padding: 1px 7px; margin-left: 4px; border-radius: 999px; background: var(--accent); color: #fff; font: 700 14px var(--font-display); text-align: center; font-variant-numeric: tabular-nums; }
+#mn-sel { flex: 1; }
+.mn-same b { color: var(--ink); font-weight: 600; }
 /* ===== end css: match-name ===== */
 
 /* ===== feature css: admin ===== */
@@ -1059,6 +1064,162 @@ details > *:not(summary) { margin-top: 8px; }
   // ===== end: match-line =====
 
   // ===== feature: match-name =====
+  // Matching: "Is your nearest station's name the same length as mine?"
+  // "Nearest" is geometric: the hider's nearest Tube station is the one whose Voronoi cell they are in. The sites are
+  // all the app's stations plus the Zone 2 Tube stations within 1.5 km of one (data/match-name-stations.json), since
+  // those can be nearer to the edge of a hiding zone than any Zone 1 station. That file is baked from the same TfL
+  // open data (via Oliver O'Brien, Open Government Licence) as the main station list, which is already credited.
+  (() => {
+    // Count letters A–Z only. The app's own "Edgware Road (…)" suffixes are dropped. Any other bracketed part, such
+    // as "Kensington (Olympia)", is ambiguous, so both counts stay possible.
+    const letters = (s) => (s.normalize("NFD").match(/[A-Za-z]/g) || []).length;
+    const baseName = (n) => (/^Edgware Road \(/.test(n) ? "Edgware Road" : n);
+    function lengthsOf(n) {
+      const b = baseName(n), m = b.match(/^(.*?)\s*\(.*\)\s*$/);
+      const out = [letters(b)];
+      if (m && letters(m[1]) !== out[0]) out.push(letters(m[1]));
+      return out;
+    }
+    const lensTxt = (ls) => `${ls.join(" or ")} letter${ls.length === 1 && ls[0] === 1 ? "" : "s"}`;
+    // Possibly the same length (any count matches), or surely the same (every count matches).
+    const maySame = (a, b) => a.some((x) => b.includes(x));
+    const sureSame = (a, b) => a.every((x) => b.every((y) => x === y));
+
+    let sites = null, failed = false; // sites: [{ n, lat, lon, xy, lens, z1 }]
+    // Each cell is voronoiCell() grown by GROW metres, and snapped to the nearest cm. Neighbouring cells then overlap
+    // slightly, not share almost-identical edges, which polygon-clipping can't always union. Only kept areas are
+    // ever unioned (see region below), so growing them can only keep a little more, never rule out too much.
+    const GROW = 0.5, snap = (v) => Math.round(v * 100) / 100;
+    const cells = [];
+    function cellOf(i) {
+      if (cells[i]) return cells[i];
+      const xy = sites.map((s) => s.xy), [sx, sy] = xy[i];
+      let ring = voronoiCell([xy[i]], 0, 30000); // just the box; the clipping below matches voronoiCell's
+      for (let j = 0; j < xy.length && ring.length; j++) {
+        const [tx, ty] = xy[j], nx = tx - sx, ny = ty - sy;
+        if (j === i || (!nx && !ny)) continue;
+        ring = clipHalf(ring, nx, ny, (nx * (sx + tx) + ny * (sy + ty)) / 2 + GROW * Math.hypot(nx, ny));
+      }
+      return (cells[i] = ring.map(([x, y]) => [snap(x), snap(y)]));
+    }
+    const NOWHERE = [[boxRing(1e7, 1e7, 1e7 + 1, 1e7 + 1)]];
+    const unionCache = new Map();
+    function unionOf(lens, mode) {
+      const k = mode + ":" + lens.join(",");
+      if (!unionCache.has(k)) {
+        const test = mode === "may" ? maySame : (a, b) => !sureSame(a, b);
+        const parts = [];
+        sites.forEach((s, i) => { if (test(s.lens, lens)) { const r = cellOf(i); if (r.length > 3) parts.push([r]); } });
+        let g = null;
+        try { g = parts.length ? pc.union(...parts) : NOWHERE; } catch (e) { console.warn("name-length union failed", e); }
+        unionCache.set(k, g);
+      }
+      return unionCache.get(k);
+    }
+    // Map-sized box, so previews and outlines don't draw 30 km cells.
+    const [ba, bb, bc, bd] = D.bbox, va = proj(ba - 0.02, bb - 0.03), vb = proj(bc + 0.02, bd + 0.03);
+    const VIEW = [[boxRing(va[0], va[1], vb[0], vb[1])]];
+    const llCache = new Map();
+    function viewLL(lens, mode) {
+      const k = mode + ":" + lens.join(",");
+      if (!llCache.has(k)) {
+        const g = unionOf(lens, mode);
+        let v = null;
+        try { v = g && g !== NOWHERE ? toLL(pc.intersection(g, VIEW)) : null; } catch (e) { console.warn(e); }
+        llCache.set(k, v);
+      }
+      return llCache.get(k);
+    }
+
+    loadJSON("data/match-name-stations.json").then((j) => {
+      const extra = (j.stations || []).filter((o) => !byName[o.n] && !stations.some((s) => dist([s.lat, s.lon], [o.lat, o.lon]) < 30));
+      sites = [
+        ...stations.map((s) => ({ n: s.n, lat: s.lat, lon: s.lon, xy: s.xy, z1: true })),
+        ...extra.map((o) => ({ n: o.n, lat: o.lat, lon: o.lon, xy: proj(o.lat, o.lon), z1: false }))
+      ];
+      sites.forEach((s) => { s.lens = lengthsOf(s.n); });
+      fillSelect();
+      render(); drawDraft(); syncPanels();
+    }).catch((e) => { console.warn("name-length stations didn't load", e); failed = true; syncPanels(); });
+
+    QTYPES.matchname = {
+      // Yes keeps every cell whose station could share the length. No keeps every cell whose station could differ
+      // (so it removes only cells whose station surely shares it). Both keep a union, so both can use grown cells.
+      region: (c) => (sites ? unionOf(c.lens, c.ans === "yes" ? "may" : "differ") : null),
+      keeps: () => true,
+      describe: (c) => ({ t: `Nearest station name length vs ${baseName(c.st)} (${lensTxt(c.lens)})`, a: c.ans === "yes" ? "Same length" : "Different length", ok: c.ans === "yes" }),
+      outline(c, style, layer) {
+        if (!sites) return;
+        const ll = viewLL(c.lens, c.ans === "yes" ? "may" : "differ");
+        if (ll) L.polygon(ll, style).addTo(layer);
+      }
+    };
+
+    const el = addSubject("match", "name", "Station name length");
+    el.innerHTML = `
+      <p class="hint mn-st" id="mn-st">Set where you are asking from to find your nearest station.</p>
+      <div class="row"><label for="mn-sel">Your station</label><select id="mn-sel"><option value="">Nearest to you</option></select></div>
+      <p class="hint mn-same" id="mn-same"></p>
+      <p class="hint">Letters only: spaces, apostrophes, “&amp;” and numbers don't count, and “St” is 2. Nearest means the nearest Tube station as the crow flies, even one just outside Zone 1. Blue: nearest station has the same length.</p>
+      <div class="answers"><button type="button" class="yes" id="mn-yes" disabled>Yes, same length</button><button type="button" class="no" id="mn-no" disabled>No, different</button></div>`;
+    const sel = el.querySelector("#mn-sel");
+    const allSites = () => sites || stations.map((s) => ({ n: s.n, lat: s.lat, lon: s.lon, lens: lengthsOf(s.n), z1: true }));
+    function fillSelect() {
+      const keep = sel.value, list = allSites().slice().sort((a, b) => a.n.localeCompare(b.n));
+      const opt = (s) => `<option value="${esc(s.n)}">${esc(s.n)} (${s.lens.join(" or ")})</option>`;
+      const out = list.filter((s) => !s.z1);
+      sel.innerHTML = `<option value="">Nearest to you</option><optgroup label="Zone 1 and 1/2">${list.filter((s) => s.z1).map(opt).join("")}</optgroup>` +
+        (out.length ? `<optgroup label="Just outside Zone 1">${out.map(opt).join("")}</optgroup>` : "");
+      sel.value = keep;
+      if (sel.value !== keep) sel.value = "";
+    }
+    fillSelect();
+    function nearestSite(ll) {
+      let best = null, bd = Infinity;
+      for (const s of allSites()) { const d = dist(ll, [s.lat, s.lon]); if (d < bd) { bd = d; best = s; } }
+      return { s: best, d: bd };
+    }
+    // The seekers' station: picked by hand, or the nearest to the ask point.
+    let lastAsk = draft.askC;
+    function mine() {
+      if (sel.value) { const s = allSites().find((x) => x.n === sel.value); if (s) return { s, d: null }; }
+      return draft.askC ? nearestSite(draft.askC) : null;
+    }
+    sel.addEventListener("change", () => { drawDraft(); syncPanels(); });
+    function answer(ans) {
+      const m = mine(); if (!m || !sites) return;
+      add({ type: "matchname", st: m.s.n, lens: m.s.lens.slice(), c: draft.askC ? draft.askC.slice() : null, ans });
+      sel.value = ""; drawDraft(); syncPanels();
+    }
+    el.querySelector("#mn-yes").onclick = () => answer("yes");
+    el.querySelector("#mn-no").onclick = () => answer("no");
+
+    hooks.sync.push(() => {
+      if (draft.askC !== lastAsk) { lastAsk = draft.askC; sel.value = ""; }
+      const m = mine(), ok = !!m && !!sites;
+      el.querySelector("#mn-yes").disabled = el.querySelector("#mn-no").disabled = !ok;
+      const stEl = el.querySelector("#mn-st"), sameEl = el.querySelector("#mn-same");
+      if (!m) { stEl.textContent = "Set where you are asking from, or choose your station."; sameEl.textContent = failed ? "Couldn't load the nearby stations. Refresh to try again." : ""; return; }
+      const where = m.d == null ? "chosen by hand" : `nearest, ${fmtD(m.d)} away`;
+      stEl.innerHTML = `<b>${esc(baseName(m.s.n))}</b><span class="mn-n">${m.s.lens.join("/")}</span> letters · <span class="sub">${esc(where)}</span>`;
+      if (!sites) { sameEl.textContent = failed ? "Couldn't load the nearby stations. Refresh to try again." : "Loading stations…"; return; }
+      const same = sites.filter((s) => s !== m.s && maySame(s.lens, m.s.lens)).map((s) => esc(baseName(s.n)) + (s.z1 ? "" : " (outside Zone 1)"));
+      const uniq = [...new Set(same)];
+      sameEl.innerHTML = uniq.length ? `Also ${esc(lensTxt(m.s.lens))}: <b>${uniq.join(", ")}</b>.` : `No other station has ${esc(lensTxt(m.s.lens))}.`;
+    });
+
+    hooks.draft.push((tab, layer) => {
+      if (tab !== "match" || !subjectOn("match", "name") || !sites) return;
+      const m = mine(); if (!m) return;
+      const ll = viewLL(m.s.lens, "may");
+      // Drawn in the "cons" pane, under the station markers, so they stay tappable.
+      if (ll) L.polygon(ll, { pane: "cons", color: "#1d3f94", weight: 2, dashArray: "6 5", fillColor: "#1d3f94", fillOpacity: 0.12, interactive: false }).addTo(layer);
+      sites.forEach((s) => {
+        if (!maySame(s.lens, m.s.lens)) return;
+        L.circleMarker([s.lat, s.lon], { pane: "cons", radius: s === m.s ? 11 : 9, stroke: false, fillColor: "#1d3f94", fillOpacity: s === m.s ? 0.9 : 0.6, interactive: false }).addTo(layer);
+      });
+    });
+  })();
   // ===== end: match-name =====
 
   // ===== feature: admin =====
