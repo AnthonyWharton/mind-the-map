@@ -77,7 +77,8 @@ function points(cat, box, keepFn = () => true) {
   return out.sort((a, b) => a.name.localeCompare(b.name)).map((o) => [o.name, +o.p[0].toFixed(5), +o.p[1].toFixed(5)]);
 }
 // Area categories: polygons (outer rings only), simplified; nodes become points if no polygon of the same name is near.
-function areas(cat, box, { minArea = 0, tol = 15, keepFn = () => true, nodes = true, dropNested = false, rename = {} } = {}) {
+// rankFn (optional): 1 for the main kind, 0 for a secondary kind that only counts where it isn't part of a main one.
+function areas(cat, box, { minArea = 0, tol = 15, keepFn = () => true, rankFn = () => 1, nodes = true, dropNested = false, rename = {} } = {}) {
   const raw = load(cat), polys = [], nodeList = [], dropped = [];
   for (const e of raw) {
     const t = e.tags || {};
@@ -85,7 +86,7 @@ function areas(cat, box, { minArea = 0, tol = 15, keepFn = () => true, nodes = t
     if (!name0) { dropped.push(`(unnamed ${e.type}/${e.id})`); continue; }
     const why = keepFn(t, name0);
     if (why !== true) { dropped.push(`${name0} [${why}]`); continue; }
-    const name = rename[name0] || name0;
+    const name = rename[name0] || name0, rank = rankFn(t);
     if (e.type === "node") { if (nodes && inB(box, [e.lat, e.lon])) nodeList.push({ name, p: [e.lat, e.lon], xy: proj(e.lat, e.lon) }); continue; }
     let rings = [];
     if (e.type === "way" && e.geometry) { const g = e.geometry.map((q) => [q.lat, q.lon]); if (g.length >= 4 && g[0][0] === g[g.length - 1][0] && g[0][1] === g[g.length - 1][1]) rings = [g]; }
@@ -109,14 +110,23 @@ function areas(cat, box, { minArea = 0, tol = 15, keepFn = () => true, nodes = t
     }
     const allPts = pr.flat();
     if (!allPts.some((q) => inB(box, unproj(q[0], q[1])))) continue;
-    polys.push({ name, xy: c, rings: pr, area });
+    polys.push({ name, xy: c, rings: pr, area, rank });
   }
   // Same place mapped more than once (e.g. way + relation, or split ways): merge same-name polygons that are within 300 m.
-  const merged = [];
+  let merged = [];
   for (const p of polys.sort((a, b) => b.area - a.area)) {
     const m = merged.find((o) => norm(o.name) === norm(p.name) && o.rings.some((r) => r.some((q) => p.rings.some((s) => s.some((u) => d2(q, u) < 300)))));
-    if (m) { m.rings.push(...p.rings); m.area += p.area; dropped.push(`${p.name} [merged part]`); } else merged.push(p);
+    if (m) { m.rings.push(...p.rings); m.area += p.area; m.rank = Math.max(m.rank, p.rank); dropped.push(`${p.name} [merged part]`); } else merged.push(p);
   }
+  // Secondary kinds (e.g. a nature reserve) that are part of a main one (a park), or that wrap a main one of a
+  // quarter of their size or more, are dropped: the park's name is what people use, and it must not be swallowed.
+  const inAny = (q, o) => o.rings.some((r) => pointInRing(q, r));
+  merged = merged.filter((p) => {
+    if (p.rank) return true;
+    const host = merged.find((o) => o.rank && (inAny(p.xy, o) || (o.area >= p.area / 4 && inAny(o.xy, p))));
+    if (host) dropped.push(`${p.name} [overlaps ${host.name}]`);
+    return !host;
+  });
   // Drop polygons that sit inside a bigger one (e.g. a named garden inside a park): its centre is inside the other.
   let final = merged;
   if (dropNested) final = merged.filter((p) => { const host = merged.find((o) => o !== p && o.area > p.area && o.rings.some((r) => pointInRing(p.xy, r))); if (host) dropped.push(`${p.name} [inside ${host.name}]`); return !host; });
@@ -147,6 +157,32 @@ function dropParts(rows, cat, r) {
     if (pre) { report[cat].dropped.push(`${x[0]} [part of ${pre[0]}]`); return false; }
     if (re.test(x[0])) return true; const host = main.find((m) => d2(proj(m[1], m[2]), proj(x[1], x[2])) < r); if (host) report[cat].dropped.push(`${x[0]} [part of ${host[0]}]`); return !host; });
 }
+// Parks: roughly what Google Maps shows as a park. Named, and at least 0.1 ha if mapped as an area.
+//  - leisure=park and leisure=common, unless access=private/no.
+//  - leisure=garden only with some sign that the public can go in: access=yes/permissive/public, a public-ish
+//    garden:type (public, municipal, botanical, memorial, community, arboretum), a council / Royal Parks / City /
+//    trust or church operator, or opening hours. Untagged gardens are too often private garden squares, palace,
+//    hotel or institution gardens to count. Never residential/private gardens, roof gardens, allotments, farms, or
+//    hotel/college/school gardens or courtyards (e.g. the V&A's).
+//  - leisure=nature_reserve and landuse=recreation_ground are secondary (rank 0): only when public, not a pen,
+//    breeding area or classroom, and (rec grounds) named like a park, not a pitch, court or club ground.
+const PUBLIC_OP = /council|borough|city of london|city of westminster|corporation|royal parks|trust|church|diocese|parish|friends of/i;
+const parkKeep = (t, n) => {
+  const acc = t.access || "";
+  if (["park", "common"].includes(t.leisure)) return ["private", "no"].includes(acc) ? "private" : true;
+  if (["private", "no", "customers", "permit", "residents", "members", "unknown"].includes(acc)) return `access=${acc}`;
+  if (t.leisure === "garden") {
+    const gt = t["garden:type"] || "";
+    if (["residential", "private", "roof_garden", "kitchen", "vegetable_garden", "pub"].includes(gt)) return `garden:type=${gt}`;
+    if (/hotel|college|universit|school|residents|allotment|\bfarm\b|roof|plantation|raised bed/i.test(n + " " + (t.operator || ""))) return "hotel, college, school, roof, allotment or farm garden";
+    if (t.man_made === "courtyard") return "courtyard";
+    const pub = ["yes", "permissive", "public", "destination"].includes(acc) || ["public", "municipal", "botanical", "memorial", "community", "arboretum"].includes(gt) || ["government", "public", "community"].includes(t["operator:type"]) || PUBLIC_OP.test(t.operator || "") || !!t.opening_hours;
+    return pub ? true : "garden with no sign of public access";
+  }
+  if (t.leisure === "nature_reserve") return /\bpen\b|breeding|ecology (centre|area|classroom)|enclosure/i.test(n) ? "enclosure or classroom" : true;
+  if (t.landuse === "recreation_ground") return /tennis|court|pitch|football|cricket|rugby|bmx|track|muga|games|cage|play|school|college|club|sports|astro|stadium/i.test(n) ? "sports ground" : /recreation ground|\brec\b|green\b|open space|park|fields?\b|meadow|common/i.test(n) ? true : "not named like a park";
+  return "not a park";
+};
 const data = {
   museum: points("museum", B1, (t) => no(t) ? "private" : true),
   library: points("library", B1, (t, n) => no(t) || ["customers", "permit"].includes(t.access) ? "private" : t["operator:type"] === "university" || /universit|college|\bUCL\b|SOAS|school|imperial/i.test((t.operator || "") + " " + n) ? "university or school" : /club|^library$|^main library$|building/i.test(n) ? "not a public library" : /^(toy|tool|seed)/.test(t.library || "") ? `library=${t.library}` : /little free library|book ?swap|bookcrossing|phone ?box/i.test(n) ? "book swap" : (t.disused === "yes" || t["disused:amenity"]) ? "disused" : true),
@@ -163,7 +199,7 @@ const data = {
     return true;
   }),
   aquarium: points("aquarium", B3, (t) => no(t) ? "private" : true),
-  park: areas("park", B1, { minArea: 5000, tol: 12, nodes: false, dropNested: true, keepFn: (t) => no(t) ? "private" : true }),
+  park: areas("park", B1, { minArea: 1000, tol: 12, dropNested: true, keepFn: parkKeep, rankFn: (t) => ["park", "common", "garden"].includes(t.leisure) ? 1 : 0 }),
   golf: areas("golf", B2, { minArea: 20000, tol: 30, keepFn: (t, n) => t.golf === "driving_range" || /driving range/i.test(n) ? "driving range" : /pitch|putt|footgolf|foot golf|crazy|\bmini|adventure golf|bigshots|world of golf|topgolf/i.test(n) || ["pitch_and_putt", "miniature"].includes(t.golf_course || t.golf) ? "not a full course" : true }),
   // Zoos: no petting zoos, city farms, aviaries, park animal enclosures or closed ones. Chessington's zoo areas
   // (Trail of the Kings, Amazu) are one zoo, named after the resort.
