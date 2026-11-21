@@ -111,6 +111,29 @@ details > *:not(summary) { margin-top: 8px; }
 .subj-body > div[hidden] { display: none; }
 .subj-body > div { display: flex; flex-direction: column; gap: 10px; }
 /* ===== feature css: game-settings ===== */
+.gs-sec { display: flex; flex-direction: column; gap: 8px; }
+.gs-sec + .gs-sec { border-top: 1px solid #efefea; padding-top: 10px; }
+.gs-h { margin: 0; font-family: var(--font-display); font-weight: 700; font-size: 16px; }
+.gs-clock { font-family: var(--font-display); font-weight: 700; font-size: 56px; line-height: 1; text-align: center; font-variant-numeric: tabular-nums; letter-spacing: 0.01em; padding: 4px 0; }
+.gs-clock.up { color: var(--no); animation: gs-pulse 1s ease-in-out infinite alternate; }
+.gs-status { text-align: center; }
+.gs-bar { display: block; height: 6px; border-radius: 3px; background: #efefea; overflow: hidden; }
+.gs-bar > span { display: block; height: 100%; background: var(--zone); }
+.gs-hdr { margin-left: auto; font-family: var(--font-display); font-weight: 600; font-size: 14px; padding: 4px 10px; border-radius: 999px; border: 0; background: #e3e9f8; color: var(--accent); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.gs-hdr[hidden] { display: none; }
+.gs-hdr.up { background: var(--no); color: #fff; animation: gs-pulse 1s ease-in-out infinite alternate; }
+@keyframes gs-pulse { from { opacity: 1; } to { opacity: .55; } }
+.gs-costs { border-collapse: collapse; font-size: 14px; width: 100%; }
+.gs-costs th { text-align: left; font-weight: 600; color: var(--muted); font-size: 13px; }
+.gs-costs th, .gs-costs td { padding: 4px 6px 4px 0; border-bottom: 1px solid #efefea; vertical-align: top; }
+.gs-costs td:nth-child(2), .gs-costs td:nth-child(3) { font-variant-numeric: tabular-nums; text-align: center; }
+.gs-costs td:last-child { color: var(--muted); font-size: 13px; }
+.gs-costs tr.gs-na td:first-child { text-decoration: line-through; color: var(--muted); }
+.gs-thermo { display: flex; flex-direction: column; gap: 6px; }
+.gs-trow { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; font-size: 14px; font-variant-numeric: tabular-nums; }
+.gs-trow.ok { color: var(--yes); font-weight: 600; }
+.gs-trow.ok .gs-bar > span { background: var(--yes); }
+.gs-note[hidden] { display: none; }
 /* ===== end css: game-settings ===== */
 
 /* ===== feature css: match-line ===== */
@@ -236,7 +259,7 @@ details > *:not(summary) { margin-top: 8px; }
   const $ = (s) => document.querySelector(s);
   const pc = window.polygonClipping;
   const STORE = "z1seek.v1";
-  const ZONE_R = 500;
+  let ZONE_R = 500; // hiding zone radius in metres; the Game tab can change it (see applyZone)
 
   // ---------- geometry: local flat projection in metres (fine at city scale) ----------
   const ER = 6371008.8, LAT0 = 51.507, LON0 = -0.12, KX = Math.cos(LAT0 * Math.PI / 180);
@@ -794,7 +817,7 @@ details > *:not(summary) { margin-top: 8px; }
   $("#l-reset").onclick = () => {
     if (!resetArmed) { resetArmed = true; $("#l-reset").textContent = "Tap again to clear everything"; setTimeout(() => { resetArmed = false; $("#l-reset").textContent = "Reset game"; }, 4000); return; }
     resetArmed = false; $("#l-reset").textContent = "Reset game";
-    state = { cons: [], boundary: true }; $("#s-boundary").checked = true; draft.radarC = draft.ta = draft.tb = draft.askC = null; draft.pts = [];
+    state = { cons: [], boundary: true, ...gameKeep() }; $("#s-boundary").checked = true; draft.radarC = draft.ta = draft.tb = draft.askC = null; draft.pts = [];
     drawDraft(); syncPanels(); render();
   };
   const encode = () => btoa(unescape(encodeURIComponent(JSON.stringify(state))));
@@ -807,12 +830,229 @@ details > *:not(summary) { margin-top: 8px; }
     try {
       const s = JSON.parse(decodeURIComponent(escape(atob($("#l-code").value.trim()))));
       if (!s || !Array.isArray(s.cons)) throw new Error("bad");
-      state = { boundary: true, ...s }; $("#s-boundary").checked = state.boundary; render();
+      state = { boundary: true, ...s }; $("#s-boundary").checked = state.boundary; applyZone(); render();
       $("#l-msg").textContent = `Loaded ${state.cons.length} answer${state.cons.length === 1 ? "" : "s"}.`;
     } catch (e) { $("#l-msg").textContent = "That code didn't work. Check you copied all of it."; }
   };
 
   // ===== feature: game-settings =====
+  // Game tab: game size, hiding zone radius, official thermometer distances and the hiding timer.
+  // Rules: Jet Lag: The Game Hide + Seek quick start guide (jet-lag-web.pages.dev, round_start, hiding_zones,
+  // investigation/*). Settings live in state so they travel in the game code:
+  //   state.size  "S" | "M" | "L" (unset: treated as small, the usual size for a single city's transit)
+  //   state.zoneR hiding zone radius in metres (unset: the 500 m house rule, so older saves and codes are unchanged)
+  //   state.timer { min: custom minutes or unset, start: epoch ms while running or null, used: ms already counted, cued: time's-up shown }
+  const MI = 1609.344;
+  const GS_SIZES = {
+    S: { name: "Small", zone: MI / 4, zoneLabel: "¼ mile", hide: 30, thermo: [MI / 2, 3 * MI] },
+    M: { name: "Medium", zone: MI / 4, zoneLabel: "¼ mile", hide: 60, thermo: [MI / 2, 3 * MI, 10 * MI] },
+    L: { name: "Large", zone: MI / 2, zoneLabel: "½ mile", hide: 180, thermo: [MI / 2, 3 * MI, 10 * MI, 50 * MI] }
+  };
+  const GS_HOUSE = 500;
+  const miLabel = (m) => ({ 402: "¼ mile", 805: "½ mile", 1609: "1 mile", 4828: "3 miles", 16093: "10 miles", 80467: "50 miles" }[Math.round(m)] || fmtDual(m));
+  const gameSize = () => (GS_SIZES[state.size] ? state.size : "S");
+  const zoneRadius = () => { const r = +state.zoneR; return r >= 50 && r <= 5000 ? r : GS_HOUSE; };
+  // What a Reset keeps: the size, radius and timer length, but not a running timer.
+  function gameKeep() {
+    const k = {};
+    if (state.size) k.size = state.size;
+    if (state.zoneR) k.zoneR = state.zoneR;
+    if (state.timer && state.timer.min) k.timer = { min: state.timer.min };
+    return k;
+  }
+  // Rebuild every station's zone circle for the current radius. Call render() afterwards.
+  function applyZone() {
+    const r = zoneRadius();
+    if (Math.abs(r - ZONE_R) < 0.001) return false;
+    ZONE_R = r;
+    regionCache.clear(); // in case a feature's region depends on the zone radius
+    for (const s of stations) {
+      s.ring = circleRing(s.xy[0], s.xy[1], r, 64);
+      s.base = Math.abs(ringArea(s.ring));
+      if (s.outline) s.outline.setLatLngs(s.ring.map(([x, y]) => unproj(x, y)));
+    }
+    return true;
+  }
+  applyZone();
+
+  // --- timer ---
+  const GS_MAXMIN = 24 * 60;
+  const timerMin = () => { const t = state.timer || {}, m = +t.min; return m > 0 && m <= GS_MAXMIN ? m : GS_SIZES[gameSize()].hide; };
+  const timerUsed = (now = Date.now()) => { const t = state.timer || {}; return (+t.used || 0) + (t.start ? Math.max(0, now - t.start) : 0); };
+  const timerLeft = (now) => timerMin() * 60000 - timerUsed(now);
+  const timerT = () => (state.timer && typeof state.timer === "object" ? state.timer : (state.timer = {}));
+  const clock = (ms) => {
+    const s = Math.max(0, Math.ceil(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, ss = String(s % 60).padStart(2, "0");
+    return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+  };
+
+  // --- Game panel ---
+  const gp = $("#p-game");
+  gp.innerHTML = `
+    <section class="gs-sec">
+      <h3 class="gs-h">Game size</h3>
+      <div class="chips" id="gs-size">${Object.entries(GS_SIZES).map(([k, v]) => `<button type="button" data-size="${k}">${v.name}</button>`).join("")}</div>
+      <p class="hint" id="gs-size-hint"></p>
+    </section>
+    <section class="gs-sec">
+      <h3 class="gs-h">Hiding zone radius</h3>
+      <div class="chips" id="gs-zone"></div>
+      <p class="hint" id="gs-zone-hint"></p>
+    </section>
+    <section class="gs-sec">
+      <h3 class="gs-h">Hiding time</h3>
+      <div class="gs-clock" id="gs-clock" role="timer" aria-live="off">30:00</div>
+      <div class="gs-bar" aria-hidden="true"><span id="gs-fill"></span></div>
+      <p class="hint gs-status" id="gs-status"></p>
+      <div class="row two"><button type="button" class="pt" id="gs-go">Start</button><button type="button" id="gs-reset">Reset timer</button></div>
+      <div class="row"><label for="gs-min">Minutes</label><input id="gs-min" type="number" inputmode="numeric" min="1" max="${GS_MAXMIN}" step="1"><button type="button" id="gs-official" hidden>Use official</button></div>
+      <p class="hint" id="gs-time-hint"></p>
+    </section>
+    <details class="gs-sec">
+      <summary>Question costs</summary>
+      <p class="hint">Cards the hider draws, then keeps, for each question. Answers are due within 5 minutes. Asking the same question again costs double.</p>
+      <table class="gs-costs" id="gs-costs"></table>
+    </details>
+    <p class="hint">These settings are saved with the game and included in the game code, so your team sees the same zones.</p>`;
+
+  const COSTS = [
+    ["Matching", 3, 1, () => ""],
+    ["Measuring", 3, 1, () => ""],
+    ["Radar", 2, 1, () => ""],
+    ["Thermometer", 2, 1, (k) => GS_SIZES[k].thermo.map(miLabel).join(", ")],
+    ["Tentacles", 4, 2, (k) => (k === "S" ? "Not in small games" : k === "M" ? "1 mile" : "1 or 15 miles")],
+    ["Photo", 1, 1, (k) => (k === "L" ? "20 min to answer" : "10 min to answer")]
+  ];
+
+  $("#gs-size").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-size]"); if (!b) return;
+    const old = gameSize(), k = b.dataset.size;
+    // If the zone was the official radius for the old size, follow the official radius for the new one.
+    if (state.zoneR && Math.abs(state.zoneR - GS_SIZES[old].zone) < 0.01) state.zoneR = GS_SIZES[k].zone;
+    state.size = k;
+    const changed = applyZone();
+    render(); syncPanels();
+    if (changed) gsToast(`Hiding zones: ${miLabel(zoneRadius())}`);
+  });
+  $("#gs-zone").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-r]"); if (!b) return;
+    state.zoneR = parseFloat(b.dataset.r);
+    if (!state.size) state.size = gameSize(); // make the shown size explicit once someone picks a radius
+    applyZone(); render(); syncPanels();
+  });
+  $("#gs-go").onclick = () => {
+    const t = timerT();
+    if (t.start) { t.used = timerUsed(); t.start = null; }
+    else if (timerLeft() > 0) { t.start = Date.now(); t.used = +t.used || 0; }
+    save(); tick();
+  };
+  let gsResetArmed = null;
+  $("#gs-reset").onclick = () => {
+    const t = timerT();
+    if (t.start && timerLeft() > 0 && !gsResetArmed) {
+      gsResetArmed = setTimeout(() => { gsResetArmed = null; tick(); }, 4000); tick(); return;
+    }
+    clearTimeout(gsResetArmed); gsResetArmed = null;
+    t.start = null; t.used = 0; t.cued = false; save(); tick();
+  };
+  $("#gs-min").addEventListener("change", (e) => {
+    const v = Math.round(parseFloat(e.target.value));
+    if (v > 0 && v <= GS_MAXMIN) { timerT().min = v; if (timerLeft() > 0) timerT().cued = false; save(); }
+    tick(); syncGame();
+  });
+  $("#gs-official").onclick = () => { delete timerT().min; if (timerLeft() > 0) timerT().cued = false; save(); tick(); syncGame(); };
+
+  // Compact countdown in the header, next to the station count.
+  const hdr = document.createElement("button");
+  hdr.type = "button"; hdr.id = "gs-hdr"; hdr.className = "gs-hdr"; hdr.hidden = true;
+  hdr.title = "Hiding time left"; hdr.onclick = () => showTab("game");
+  $("#count").before(hdr);
+
+  // The shared toast always offers Undo (of the last answer); hide it while one of our messages shows.
+  let gsMsg = null;
+  const undoBtn = $("#t-undo");
+  new MutationObserver(() => { undoBtn.hidden = $("#t-text").textContent === gsMsg; }).observe($("#t-text"), { childList: true, characterData: true, subtree: true });
+  function gsToast(msg) { gsMsg = msg; toast(msg); undoBtn.hidden = true; }
+
+  function cue() {
+    gsToast("Time’s up. Seekers, go!");
+    try { if (navigator.vibrate) navigator.vibrate([400, 150, 400, 150, 700]); } catch (e) {}
+  }
+  function tick() {
+    const t = state.timer || {}, now = Date.now(), left = timerLeft(now), running = !!t.start, total = timerMin() * 60000;
+    const up = left <= 0;
+    if (!up && t.cued) t.cued = false;
+    if (up && (running || timerUsed(now) > 0) && !t.cued) { timerT().cued = true; save(); cue(); }
+    const over = up ? -left : 0;
+    $("#gs-clock").textContent = up && timerUsed(now) > 0 ? "Time’s up" : clock(left);
+    $("#gs-clock").classList.toggle("up", up && timerUsed(now) > 0);
+    $("#gs-fill").style.width = `${Math.min(100, Math.max(0, timerUsed(now) / total * 100)).toFixed(2)}%`;
+    const go = $("#gs-go");
+    go.textContent = running && !up ? "Pause" : up && timerUsed(now) > 0 ? "Time’s up" : timerUsed(now) > 0 ? "Resume" : "Start";
+    go.disabled = up && timerUsed(now) > 0;
+    go.classList.toggle("set", running && !up);
+    $("#gs-reset").textContent = gsResetArmed ? "Tap again to reset" : "Reset timer";
+    $("#gs-status").textContent = up && timerUsed(now) > 0
+      ? (running ? `Seekers released ${clock(over)} ago.` : "The hiding period is over.")
+      : running ? `Hiders have until ${new Date(now + left).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}.`
+      : timerUsed(now) > 0 ? "Paused." : "Start when the seekers let the hiders go.";
+    // Header: shown while running, and for 2 minutes after time is up.
+    const showHdr = running && (!up || over < 120000);
+    hdr.hidden = !showHdr;
+    if (showHdr) { hdr.textContent = up ? "Time’s up" : `⏱ ${clock(left)}`; hdr.classList.toggle("up", up); hdr.setAttribute("aria-label", up ? "Hiding time is up" : `Hiding time left ${clock(left)}`); }
+  }
+  setInterval(tick, 500);
+
+  function syncGame() {
+    const k = gameSize(), sz = GS_SIZES[k], r = zoneRadius();
+    document.querySelectorAll("#gs-size button").forEach((b) => b.classList.toggle("on", b.dataset.size === k));
+    $("#gs-size-hint").textContent = `${sz.name} game: ${sz.hide} minutes to hide, ${sz.zoneLabel} hiding zones, thermometers of ${sz.thermo.map(miLabel).join(", ")}${k === "S" ? ", no tentacles" : ""}.${state.size ? "" : " Zone 1 is usually played as a small game."}`;
+    // Radius chips: the official one for this size, the house rule, and whatever is set now if it's neither.
+    const opts = [[sz.zone, `${sz.zoneLabel} (official)`], [GS_HOUSE, "500 m (house rule)"]];
+    if (!opts.some(([m]) => Math.abs(m - r) < 0.01)) opts.push([r, miLabel(r)]);
+    const zc = $("#gs-zone");
+    const html = opts.map(([m, l]) => `<button type="button" data-r="${m}" class="${Math.abs(m - r) < 0.01 ? "on" : ""}">${esc(l)}</button>`).join("");
+    if (zc.innerHTML !== html) zc.innerHTML = html;
+    $("#gs-zone-hint").textContent = `Each station's hiding zone is a circle of ${fmtDual(r)} around it. The official rules use ${sz.zoneLabel} for a ${sz.name.toLowerCase()} game; this app used 500 m before. Everyone on your team should use the same setting.`;
+    const inp = $("#gs-min");
+    if (document.activeElement !== inp) inp.value = timerMin();
+    const custom = state.timer && state.timer.min && +state.timer.min !== sz.hide;
+    $("#gs-official").hidden = !custom;
+    $("#gs-official").textContent = `Use ${sz.hide} min`;
+    $("#gs-time-hint").textContent = `Official hiding time for a ${sz.name.toLowerCase()} game: ${sz.hide} minutes.`;
+    $("#gs-costs").innerHTML = `<tr><th>Question</th><th>Draw</th><th>Keep</th><th></th></tr>` + COSTS.map(([n, d, kp, note]) => {
+      const x = note(k); return `<tr class="${n === "Tentacles" && k === "S" ? "gs-na" : ""}"><td>${n}</td><td>${d}</td><td>${kp}</td><td>${esc(x)}</td></tr>`;
+    }).join("");
+    tick();
+  }
+
+  // --- Thermometer: official distances and how far A→B (or A→you) has gone ---
+  const thermoBox = document.createElement("div");
+  thermoBox.className = "gs-thermo";
+  $("#t-info").after(thermoBox);
+  const gpsNow = () => { try { return gps && gps.ll; } catch (e) { return null; } };
+  function syncThermo() {
+    const k = gameSize(), sz = GS_SIZES[k];
+    const a = draft.ta, b = draft.tb || (a ? gpsNow() : null);
+    let html = `<p class="hint">${sz.name} game thermometers: ${sz.thermo.map(miLabel).join(", ")}.</p>`;
+    if (a && b) {
+      const d = dist(a, b);
+      const rows = sz.thermo.map((m) => {
+        const f = Math.min(1, d / m), ok = d >= m;
+        return `<div class="gs-trow${ok ? " ok" : ""}"><span class="gs-bar"><span style="width:${(f * 100).toFixed(1)}%"></span></span><span>${ok ? `✓ ${miLabel(m)} done` : `Travelled ${(d / MI).toFixed(2)} of ${miLabel(m)}`}</span></div>`;
+      }).join("");
+      // With B set, the panel already says how far A→B is; only spell it out for the live GPS reading.
+      html += `${draft.tb ? "" : `<p class="hint">From A to where you are now: ${fmtDual(d)} as the crow flies.</p>`}${rows}`;
+    }
+    if (thermoBox.innerHTML !== html) thermoBox.innerHTML = html;
+  }
+  // Tentacles aren't used in small games: say so in that tab (only once a size has been chosen).
+  const tentNote = document.createElement("p");
+  tentNote.className = "hint gs-note"; tentNote.hidden = true;
+  tentNote.textContent = "Tentacles questions aren't used in small games. Change the game size in the Game tab.";
+  const tp = $("#p-tentacles"); if (tp) tp.prepend(tentNote);
+
+  hooks.sync.push(() => { syncGame(); syncThermo(); tentNote.hidden = state.size !== "S"; });
   // ===== end: game-settings =====
 
   // ===== feature: match-line =====
