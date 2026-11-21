@@ -6,8 +6,9 @@ It shows every Zone 1 tube station with its hiding zone, and gives seekers tools
 
 - **Radar**: "are you within X of me?" from your GPS position or any point
 - **Thermometer**: hotter or colder after moving from A to B, with progress against the official distances
-- **Match**: "is your nearest ___ the same as mine?" for transit line, station name length, river side (north/south), borough and ward
-- **Measure**: "are you closer to or further from ___ than me?" for the Thames (optionally lakes, canals and docks), rail stations, and the river and borough borders
+- **Match**: "is your nearest ___ the same as mine?" for transit line, station name length, river side (north/south), borough, ward and places (museums, libraries, cinemas, hospitals, parks, embassies and more)
+- **Measure**: "are you closer to or further from ___ than me?" for the Thames (optionally lakes, canals and docks), rail stations, the river and borough borders, and the same places
+- **Tentacles**: "of all the ___ within a mile of me, which are you nearest to?" for museums, libraries, cinemas and hospitals (plus zoos, aquariums and theme parks in large games)
 - **Draw**: outline any area and say whether the hider is inside or outside it (for photos and anything else)
 - **Stations**: rule individual stations out by hand, and open any station in Google Maps
 - **Game**: game size, hiding zone radius (official ¼ or ½ mile, or 500 m), a hiding timer and the question costs
@@ -23,7 +24,7 @@ A single static `index.html`, no build step. Leaflet and polygon-clipping load f
 Data for the newer questions is pre-built into `data/`:
 
 - `admin-divisions.json`: wards and boroughs from the ONS Open Geography Portal (Open Government Licence)
-- `measure-thames-water.json`, `measure-station-rail.json`: water and rail stations from OpenStreetMap (ODbL)
+- `measure-thames-water.json`, `measure-station-rail.json`, `poi-places.json`: water, rail stations and places from OpenStreetMap (ODbL); `poi-build/` rebuilds the places
 - `match-name-stations.json`: Zone 2 stations near Zone 1, from the same TfL data
 
 Street map © OpenStreetMap contributors. Boundaries contain National Statistics and OS data © Crown copyright and database right.

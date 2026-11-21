@@ -365,8 +365,8 @@ details > *:not(summary) { margin-top: 8px; }
   }
   // Everything within r metres of any of the projected points, as a multipolygon.
   const bufferPoints = (pts, r, n = 48) => pc.union(...pts.map(([x, y]) => [circleRing(x, y, r, n)]));
-  // Google Maps link for a place: by Place ID when known, otherwise by name near its coordinates.
-  const mapsUrl = (name, lat, lon, placeId) => `https://www.google.com/maps/search/?${new URLSearchParams(placeId ? { api: "1", query: name, query_place_id: placeId } : { api: "1", query: `${lat.toFixed(6)},${lon.toFixed(6)}` })}`;
+  // Google Maps link for a place: by Place ID when known, otherwise a search for its name (or its coordinates if it has none).
+  const mapsUrl = (name, lat, lon, placeId) => `https://www.google.com/maps/search/?${new URLSearchParams({ api: "1", query: name || `${lat.toFixed(6)},${lon.toFixed(6)}`, ...(placeId ? { query_place_id: placeId } : {}) })}`;
   const mapsLink = (name, lat, lon, placeId, text = "Open in Google Maps") => `<a class="maps-link" href="${esc(mapsUrl(name, lat, lon, placeId))}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`;
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -2368,7 +2368,7 @@ details > *:not(summary) { margin-top: 8px; }
         const d = fmtDual(n.d), lead = `Your nearest is ${n.s.n}, ${d} away.`;
         info.innerHTML = esc(n.d < MS_MIN
           ? `${lead} You're at a station, so “closer” would mean they're at one too. Closer keeps ${MS_MIN} m around every station to allow for GPS error.`
-          : `${lead} Closer keeps everywhere within ${fmtD(n.d)} of a station; further rules it out.`) + " " + mapsLink(n.s.placeId ? `${n.s.n.replace(/ \(.*\)$/, "")} station, London` : n.s.n, n.s.lat, n.s.lon, n.s.placeId, `${n.s.n} in Google Maps`);
+          : `${lead} Closer keeps everywhere within ${fmtD(n.d)} of a station; further rules it out.`) + " " + mapsLink(`${n.s.n.replace(/ \(.*\)$/, "")} station, London`, n.s.lat, n.s.lon, n.s.placeId, `${n.s.n} in Google Maps`);
       }
       q(".ms-closer").disabled = q(".ms-further").disabled = !n;
       q(".ms-closer").textContent = n ? `Closer than ${fmtD(n.d)}` : "Closer";
@@ -2821,7 +2821,7 @@ details > *:not(summary) { margin-top: 8px; }
       return;
     }
     const x = s.chosen;
-    info.textContent = `${s.chosen === s.ranked[0] ? "Your nearest" : "You picked"} ${C.one}: ${x.pl.n}, ${fmtDual(x.d)} away.${tab === "measure" ? ` Closer keeps everywhere within that distance of any ${C.one} (with 25 m leeway).` : ""} Not right? Tap the one you think is nearest.`;
+    info.innerHTML = esc(`${s.chosen === s.ranked[0] ? "Your nearest" : "You picked"} ${C.one}: ${x.pl.n}, ${fmtDual(x.d)} away.${tab === "measure" ? ` Closer keeps everywhere within that distance of any ${C.one} (with 25 m leeway).` : ""} Not right? Tap the one you think is nearest.`) + " " + mapsLink(`${x.pl.n}, London`, x.pl.ll[0], x.pl.ll[1], null, `${x.pl.n} in Google Maps`);
     const top = s.ranked.slice(0, 4);
     if (!top.includes(x)) top.push(x);
     list.innerHTML = top.map(chip).join("");
