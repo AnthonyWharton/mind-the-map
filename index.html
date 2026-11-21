@@ -92,12 +92,16 @@ button.danger { color: var(--no); }
 details summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
 details > *:not(summary) { margin-top: 8px; }
 .empty { color: var(--muted); font-size: 14px; padding: 6px 0; }
-/* Station labels: on by default at every zoom (smaller when zoomed out); the layers menu turns them off. */
+/* Station labels, set in the layers menu: Auto shows them once zoomed in enough to read them (the default),
+   On shows them at every zoom (smaller when zoomed out), Off hides them. */
 .leaflet-tooltip.stn { background: rgba(255,255,255,.88); border: 0; box-shadow: none; padding: 0 4px; font: 600 11px var(--font-body); color: var(--ink); border-radius: 4px; display: none; }
 .leaflet-tooltip.stn::before { display: none; }
 .leaflet-tooltip.stn.gone { color: #8a8f99; }
-.leaflet-container:not(.no-names) .leaflet-tooltip.stn { display: block; }
-.leaflet-container:not(.labels) .leaflet-tooltip.stn { font-size: 9px; padding: 0 2px; }
+.names-auto.labels .leaflet-tooltip.stn, .names-on .leaflet-tooltip.stn { display: block; }
+.names-on:not(.labels) .leaflet-tooltip.stn { font-size: 9px; padding: 0 2px; }
+.names-mode { padding: 2px 0; }
+.names-mode > span { display: block; font-size: 13px; margin-bottom: 2px; }
+.names-mode label { display: inline-flex; align-items: center; gap: 3px; margin-right: 8px; font-size: 13px; }
 .locate { width: 34px; height: 34px; padding: 0; display: grid; place-items: center; background: #fff; color: var(--accent); border: 2px solid rgba(0,0,0,.2); border-radius: 4px; background-clip: padding-box; }
 #banner #b-gps { background: #2a7de1; color: #fff; border: 0; }
 .ptlabel { background: var(--accent); color: #fff; font: 700 12px var(--font-display); width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
@@ -508,11 +512,11 @@ details > *:not(summary) { margin-top: 8px; }
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
   }).addTo(map);
   const simple = L.layerGroup();
-  // Layers menu overlays: station names (on or off) and a key to the Tube line colours.
+  // Layers menu: station names (Auto / On / Off) and a key to the Tube line colours (an overlay switch).
   // Both are empty layer groups used as switches, so the choice sticks per device (localStorage, best effort).
-  const names = L.layerGroup(), key = L.layerGroup();
-  const prefGet = (k, d) => { try { const v = localStorage.getItem("mtm-" + k); return v === null ? d : v === "1"; } catch (e) { return d; } };
-  const prefSet = (k, v) => { try { localStorage.setItem("mtm-" + k, v ? "1" : "0"); } catch (e) {} };
+  const key = L.layerGroup();
+  const prefGet = (k, d) => { try { const v = localStorage.getItem("mtm-" + k); return v === null ? d : v; } catch (e) { return d; } };
+  const prefSet = (k, v) => { try { localStorage.setItem("mtm-" + k, v); } catch (e) {} };
   const lineKey = L.control({ position: "bottomleft" });
   lineKey.onAdd = () => {
     const div = L.DomUtil.create("div", "line-key");
@@ -524,12 +528,20 @@ details > *:not(summary) { margin-top: 8px; }
   };
   map.on("overlayadd overlayremove", (e) => {
     const on = e.type === "overlayadd";
-    if (e.layer === names) { map.getContainer().classList.toggle("no-names", !on); prefSet("names", on); }
-    if (e.layer === key) { if (on) lineKey.addTo(map); else lineKey.remove(); prefSet("key", on); }
+    if (e.layer === key) { if (on) lineKey.addTo(map); else lineKey.remove(); prefSet("key", on ? "1" : "0"); }
   });
-  L.control.layers({ "Street map": tiles, "Simple map (Thames and lines)": simple }, { "Station names": names, "Tube line key": key }, { position: "topright" }).addTo(map);
-  if (prefGet("names", true)) names.addTo(map); else map.getContainer().classList.add("no-names");
-  if (prefGet("key", false)) key.addTo(map);
+  const layersCtl = L.control.layers({ "Street map": tiles, "Simple map (Thames and lines)": simple }, { "Tube line key": key }, { position: "topright" }).addTo(map);
+  if (prefGet("key", "0") === "1") key.addTo(map);
+  const setNames = (m) => { const c = map.getContainer().classList; ["auto", "on", "off"].forEach((x) => c.toggle("names-" + x, x === m)); prefSet("names", m); };
+  {
+    const list = layersCtl.getContainer().querySelector(".leaflet-control-layers-list"), sec = document.createElement("div");
+    sec.className = "names-mode";
+    sec.innerHTML = `<span>Station names</span>` + [["auto", "Auto"], ["on", "On"], ["off", "Off"]].map(([v, t]) => `<label><input type="radio" name="names-mode" value="${v}"> ${t}</label>`).join("");
+    list.append(Object.assign(document.createElement("div"), { className: "leaflet-control-layers-separator" }), sec);
+    let m = prefGet("names", "auto"); if (!["auto", "on", "off"].includes(m)) m = "auto";
+    sec.querySelector(`input[value="${m}"]`).checked = true; setNames(m);
+    sec.addEventListener("change", (e) => setNames(e.target.value));
+  }
   const panes = { base: 300, lines: 380, mask: 400, zones: 410, cons: 420, stns: 450, draft: 460, gps: 470 };
   for (const [n, z] of Object.entries(panes)) { map.createPane(n).style.zIndex = z; }
   const stBounds = L.latLngBounds(stations.map((s) => [s.lat, s.lon]));

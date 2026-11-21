@@ -25,6 +25,6 @@ Data for the newer questions is pre-built into `data/`:
 - `measure-thames-water.json`, `measure-station-rail.json`, `poi-places.json`: water, rail stations and places from OpenStreetMap (ODbL); `poi-build/` rebuilds the places
 - `match-name-stations.json`: Zone 2 stations near Zone 1, from the same TfL data
 
-The layers menu (top right) switches station names on or off and shows a key to the Tube line colours. Map credits sit behind the small "© OSM" tag in the corner.
+The layers menu (top right) sets station names to Auto (shown once zoomed in), On or Off, and shows a key to the Tube line colours. Map credits sit behind the small "© OSM" tag in the corner.
 
 Street map © OpenStreetMap contributors. Boundaries contain National Statistics and OS data © Crown copyright and database right.
