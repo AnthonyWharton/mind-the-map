@@ -151,6 +151,10 @@ details > *:not(summary) { margin-top: 8px; }
 .ms-retry[hidden] { display: none; }
 /* ===== end css: measure-station ===== */
 
+/* ===== feature css: measure-sea ===== */
+.msea-retry[hidden] { display: none; }
+/* ===== end css: measure-sea ===== */
+
 /* ===== feature css: poi ===== */
 .poi .poi-on { display: flex; flex-direction: column; gap: 10px; }
 .poi .poi-on[hidden], .poi .poi-off[hidden] { display: none; }
@@ -2167,6 +2171,251 @@ details > *:not(summary) { margin-top: 8px; }
     });
   }
   // ===== end: measure-station =====
+
+  // ===== feature: measure-sea =====
+  // Measuring: "Compared to me, are you closer to or further from sea level?" Closer: the hider's ground is lower
+  // than the seekers'. Further: it's higher.
+  // Data: data/measure-sea-level.json, ground height on a 25 m grid over every hiding zone plus 1 km, baked by
+  // data/sea-level-build/build.js from AWS Terrain Tiles, which over England come from the Environment Agency's
+  // 2 m LIDAR composite DTM (Open Government Licence v3). It's bare earth: buildings and bridges are removed.
+  // Each cell holds the lowest and highest ~6 m pixel inside it.
+  // Hider's side: Closer keeps every cell whose lowest point is under the highest point of the seekers' own cell
+  // plus TOL; Further keeps every cell whose highest point is over the lowest point of the seekers' cell minus TOL.
+  // TOL (2 m) covers the tiles' resampling and players checking with another map or app, so borderline spots stay in.
+  // The kept area is traced with marching squares on cell corners, each corner taking the min (or max) of its four
+  // cells, so every kept cell's corners are all inside; crossings are held 1/3 to 2/3 along each grid edge, which
+  // leaves at least C/3/√2 (5.9 m) of slack around every kept cell for the TAU (4 m) contour simplification.
+  {
+    const T = "measure-sea", TOL = 2, TAU = 4, HOLE_MIN = 5000, URL = "data/measure-sea-level.json";
+    let G = null, gP = null, gFail = 0;
+    map.attributionControl.addAttribution('Heights: <a href="https://registry.opendata.aws/terrain-tiles/">Terrain Tiles</a> (Mapzen), &copy; Environment Agency copyright and/or database right 2015. All rights reserved (OGL v3)');
+    const fmtH = (m) => `${Math.round(m)} m`;
+    const dpLine = (pts, tol) => {
+      if (pts.length < 3) return pts.slice();
+      const keep = new Uint8Array(pts.length); keep[0] = keep[pts.length - 1] = 1;
+      const st = [[0, pts.length - 1]];
+      while (st.length) {
+        const [i, j] = st.pop(), [ax, ay] = pts[i], [bx, by] = pts[j], dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
+        let md = 0, mi = -1;
+        for (let k = i + 1; k < j; k++) { const [px, py] = pts[k], dd = L ? Math.abs(dx * (ay - py) - dy * (ax - px)) / L : Math.hypot(px - ax, py - ay); if (dd > md) { md = dd; mi = k; } }
+        if (md > tol) { keep[mi] = 1; st.push([i, mi], [mi, j]); }
+      }
+      return pts.filter((_, k) => keep[k]);
+    };
+    const dpRing = (r, tol) => {
+      const pts = r.slice(0, -1); if (pts.length < 4) return r;
+      let fi = 0, fd = -1;
+      for (let k = 1; k < pts.length; k++) { const d = Math.hypot(pts[k][0] - pts[0][0], pts[k][1] - pts[0][1]); if (d > fd) { fd = d; fi = k; } }
+      const out = dpLine(pts.slice(0, fi + 1), tol).concat(dpLine(pts.slice(fi).concat([pts[0]]), tol).slice(1));
+      return out.length >= 4 ? out : r;
+    };
+
+    // ---- data ----
+    const decode = (j) => {
+      if (!j || !j.proj || j.proj.LAT0 !== LAT0 || j.proj.LON0 !== LON0) throw new Error("height grid projection mismatch");
+      const { C, x0, y0, nx, ny } = j, N = nx * ny, NX = nx + 1, NY = ny + 1;
+      const vals = (s) => {
+        const b = atob(s), out = new Int32Array(N); let p = 0;
+        for (let k = 0; k < N; k++) { let v = 0, m = 1, c; do { c = b.charCodeAt(p++); v += (c & 127) * m; m *= 128; } while (c & 128); out[k] = v; }
+        if (p !== b.length) throw new Error("bad height grid");
+        return out;
+      };
+      const dz = vals(j.lo), sp = vals(j.spread), Ld = new Int32Array(N), lo = new Float64Array(N), hi = new Float64Array(N);
+      for (let jj = 0; jj < ny; jj++) for (let i = 0; i < nx; i++) {
+        const k = jj * nx + i, z = dz[k], d = z & 1 ? -(z + 1) / 2 : z / 2;
+        Ld[k] = (i ? Ld[k - 1] : jj ? Ld[k - nx] : 0) + d;
+        lo[k] = Ld[k] / 10; hi[k] = (Ld[k] + sp[k]) / 10;
+      }
+      // Corner fields: lowest and (negated) highest of the up-to-4 cells at each corner, and the mean mid-height for the preview.
+      const nLo = new Float64Array(NX * NY).fill(Infinity), nNegHi = new Float64Array(NX * NY).fill(Infinity), nMid = new Float64Array(NX * NY), nC = new Uint8Array(NX * NY);
+      for (let jj = 0; jj < ny; jj++) for (let i = 0; i < nx; i++) {
+        const k = jj * nx + i, m = (lo[k] + hi[k]) / 2;
+        for (let q = 0; q < 4; q++) {
+          const n = (jj + (q >> 1)) * NX + i + (q & 1);
+          if (lo[k] < nLo[n]) nLo[n] = lo[k];
+          if (-hi[k] < nNegHi[n]) nNegHi[n] = -hi[k];
+          nMid[n] += m; nC[n]++;
+        }
+      }
+      for (let n = 0; n < NX * NY; n++) nMid[n] /= nC[n];
+      return { C, x0, y0, nx, ny, NX, NY, lo, hi, f: { lo: nLo, hi: nNegHi, mid: nMid }, cache: new Map() };
+    };
+    const refresh = () => { render(); drawDraft(); syncPanels(); };
+    const need = () => {
+      if (G || gP || Date.now() - gFail < 10000) return;
+      gP = loadJSON(URL).then((j) => { G = decode(j); gP = null; gFail = 0; setTimeout(refresh, 0); })
+        .catch((e) => { console.warn(e); gP = null; gFail = Date.now(); syncPanels(); });
+    };
+    // The cell at a point: lowest, highest and middle height, or null outside the grid.
+    const cellAt = (ll) => {
+      if (!G || !ll) return null;
+      const [x, y] = proj(ll[0], ll[1]), i = Math.floor((x - G.x0) / G.C), j = Math.floor((y - G.y0) / G.C);
+      if (i < 0 || j < 0 || i >= G.nx || j >= G.ny) return null;
+      const k = j * G.nx + i;
+      return { lo: G.lo[k], hi: G.hi[k], mid: (G.lo[k] + G.hi[k]) / 2 };
+    };
+
+    // ---- marching squares on a corner field: the area where f <= t, as a multipolygon (outer rings CCW, holes CW) ----
+    // safe: hold crossings 1/3..2/3 along each edge and drop holes under HOLE_MIN m² (both only ever keep more area).
+    const trace = (f, t, safe) => {
+      const { C, x0, y0, NX, NY } = G, W = NX + 2, lim = safe ? 1 / 3 : 0.001;
+      const val = (i, j) => (i < 0 || j < 0 || i >= NX || j >= NY) ? Infinity : f[j * NX + i]; // outside the grid is never kept
+      const pt = new Map(), next = new Map();
+      const cross = (ai, aj, bi, bj) => {
+        const id = aj === bj ? 2 * ((aj + 1) * W + Math.min(ai, bi) + 1) : 2 * ((Math.min(aj, bj) + 1) * W + ai + 1) + 1;
+        if (!pt.has(id)) {
+          const fa = val(ai, aj), fb = val(bi, bj);
+          let u = fa === Infinity || fb === Infinity ? 0.5 : (t - fa) / (fb - fa); u = u < lim ? lim : u > 1 - lim ? 1 - lim : u;
+          pt.set(id, [x0 + (ai + (bi - ai) * u) * C, y0 + (aj + (bj - aj) * u) * C]);
+        }
+        return id;
+      };
+      const ci = [0, 1, 1, 0], cj = [0, 0, 1, 1], inn = [0, 0, 0, 0], ev = [];
+      for (let j = -1; j < NY; j++) for (let i = -1; i < NX; i++) {
+        let n = 0;
+        for (let k = 0; k < 4; k++) { inn[k] = val(i + ci[k], j + cj[k]) <= t ? 1 : 0; n += inn[k]; }
+        if (n === 0 || n === 4) continue;
+        ev.length = 0;
+        for (let k = 0; k < 4; k++) { const k2 = (k + 1) % 4; if (inn[k] !== inn[k2]) ev.push(cross(i + ci[k], j + cj[k], i + ci[k2], j + cj[k2]), inn[k]); }
+        if (ev.length === 4) { if (ev[1]) next.set(ev[0], ev[2]); else next.set(ev[2], ev[0]); }
+        else { // saddle: join through the centre if the centre is inside
+          const mid = (val(i, j) + val(i + 1, j) + val(i + 1, j + 1) + val(i, j + 1)) / 4 <= t;
+          for (let k = 0; k < 4; k++) if (ev[2 * k + 1]) next.set(ev[2 * k], ev[2 * ((k + (mid ? 1 : 3)) % 4)]);
+        }
+      }
+      const outers = [], holes = [];
+      for (const start of [...next.keys()]) {
+        if (!next.has(start)) continue;
+        let ring = [], id = start;
+        while (next.has(id)) { ring.push(pt.get(id)); const n2 = next.get(id); next.delete(id); id = n2; }
+        if (ring.length < 3) continue;
+        ring.push(ring[0].slice()); ring = dpRing(ring, TAU);
+        if (ring.length < 4) continue;
+        const a = ringArea(ring);
+        if (a < 0 && safe && -a < HOLE_MIN) continue;
+        let bb = [Infinity, Infinity, -Infinity, -Infinity];
+        for (const [x, y] of ring) bb = [Math.min(bb[0], x), Math.min(bb[1], y), Math.max(bb[2], x), Math.max(bb[3], y)];
+        (a > 0 ? outers : holes).push({ ring, a: Math.abs(a), bb });
+      }
+      outers.sort((p, q) => p.a - q.a);
+      const polys = outers.map((o) => [o.ring]);
+      for (const h of holes) {
+        const [x, y] = h.ring[0];
+        const k = outers.findIndex((o) => o.a > h.a && x >= o.bb[0] && x <= o.bb[2] && y >= o.bb[1] && y <= o.bb[3] && pointInRing([x, y], o.ring));
+        if (k >= 0) polys[k].push(h.ring);
+      }
+      return polys;
+    };
+    // kind "lo": where the lowest point is <= t. "hi": where the highest point is >= t. "mid": the preview's smooth contour (<= t).
+    const within = (kind, t, safe = true) => {
+      if (!G) return null;
+      const key = `${kind}|${t.toFixed(2)}|${safe}`;
+      if (!G.cache.has(key)) { if (G.cache.size > 16) G.cache.clear(); G.cache.set(key, kind === "hi" ? trace(G.f.hi, -t, safe) : trace(G.f[kind], t, safe)); }
+      return G.cache.get(key);
+    };
+    // Parts that touch no hiding zone can't change anything, so they're left out to keep clipping quick.
+    const zoneBB = stations.map((s) => { const xs = s.ring.map((p) => p[0]), ys = s.ring.map((p) => p[1]); return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]; });
+    const nearZones = (mp) => mp.filter((poly) => {
+      let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
+      for (const [x, y] of poly[0]) { if (x < a) a = x; if (y < b) b = y; if (x > c) c = x; if (y > d) d = y; }
+      return zoneBB.some((z) => a <= z[2] && c >= z[0] && b <= z[3] && d >= z[1]);
+    });
+    // Outline as lat/lng polylines, leaving out the artificial edge where the grid ends.
+    const outlineLL = (mp) => {
+      const a = G.x0, b = G.y0, c = G.x0 + G.nx * G.C, d = G.y0 + G.ny * G.C, out = [];
+      const edge = ([x, y]) => x < a - 0.01 || x > c + 0.01 || y < b - 0.01 || y > d + 0.01;
+      for (const poly of mp) for (const ring of poly) {
+        let cur = [];
+        for (const p of ring) { if (edge(p)) { if (cur.length > 1) out.push(cur); cur = []; } else cur.push(unproj(p[0], p[1])); }
+        if (cur.length > 1) out.push(cur);
+      }
+      return out;
+    };
+
+    // Cut the kept area into TILE-metre squares (columns first, then each column into squares), so each zone is only
+    // clipped against the few pieces near it rather than one contour spanning Zone 1: renders get about 3 times
+    // quicker. Parts already inside one square are passed through as they are. If a cut fails, the uncut area is used.
+    const TILE = 500;
+    const bbOf = (p) => { let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity; for (const [x, y] of p[0]) { if (x < a) a = x; if (y < b) b = y; if (x > c) c = x; if (y > d) d = y; } return [a, b, c, d]; };
+    const tiled = (mp) => {
+      const out = [], tx = (x) => Math.floor((x - G.x0) / TILE), ty = (y) => Math.floor((y - G.y0) / TILE), cols = new Map();
+      const zoneNear = (x, y, w, h) => zoneBB.some((z) => x <= z[2] && x + w >= z[0] && y <= z[3] && y + h >= z[1]);
+      for (const p of mp) {
+        const b = bbOf(p), i0 = tx(b[0]), i1 = tx(b[2]);
+        if (i0 === i1 && ty(b[1]) === ty(b[3])) { out.push(p); continue; }
+        for (let i = i0; i <= i1; i++) { if (!cols.has(i)) cols.set(i, []); cols.get(i).push(p); }
+      }
+      try {
+        for (const [i, ps] of cols) {
+          const x = G.x0 + i * TILE, H = G.ny * G.C + 2 * G.C;
+          const strip = pc.intersection([boxRing(x, G.y0 - G.C, x + TILE, G.y0 + H)], ps).map((p) => ({ p, b: bbOf(p) }));
+          const rows = new Map();
+          for (const s of strip) for (let j = ty(s.b[1]); j <= ty(s.b[3]); j++) { if (!rows.has(j)) rows.set(j, []); rows.get(j).push(s); }
+          for (const [j, ss] of rows) {
+            const y = G.y0 + j * TILE;
+            if (!zoneNear(x, y, TILE, TILE)) continue;
+            const whole = ss.filter((s) => ty(s.b[1]) === j && ty(s.b[3]) === j), part = ss.filter((s) => !whole.includes(s));
+            for (const s of whole) out.push(s.p);
+            if (part.length) for (const p of pc.intersection([boxRing(x, y, x + TILE, y + TILE)], part.map((s) => s.p))) out.push(p);
+          }
+        }
+      } catch (e) { console.warn("sea-level tiling failed", e); return mp; }
+      return out;
+    };
+    // SLACK: half a decimetre, so a spot exactly at the limit (heights are stored to 0.1 m) is never lost to rounding.
+    const SLACK = 0.05, kept = (c) => nearZones(c.ans === "closer" ? within("lo", c.hi + TOL + SLACK) : within("hi", c.lo - TOL - SLACK));
+
+    QTYPES[T] = {
+      region(c) {
+        if (!G) { need(); return null; }
+        return tiled(kept(c));
+      },
+      keeps: () => true,
+      describe: (c) => ({ t: `Sea level: hider ${c.ans === "closer" ? "lower" : "higher"} than the seekers' ${fmtH((c.lo + c.hi) / 2)} (from ${placeName(c.c)})`, a: c.ans === "closer" ? "Closer" : "Further", ok: c.ans === "closer" }),
+      outline(c, st, layer) { if (G) L.polyline(outlineLL(kept(c)), st).addTo(layer); },
+    };
+
+    // ---- UI ----
+    const el = addSubject("measure", "sea", "Sea level");
+    el.innerHTML = `<p class="hint msea-info">Set where you are asking from.</p>
+      <div class="row msea-retry" hidden><button type="button">Try loading again</button></div>
+      <div class="answers"><button type="button" class="yes msea-closer" disabled>Closer</button><button type="button" class="no msea-further" disabled>Further</button></div>
+      <p class="hint">Closer means the hider's ground is lower than yours, further means higher. Heights are bare ground (bridges, buildings and upper floors don't count) from the Environment Agency's LIDAR survey, on a 25 m grid. Other maps and apps can differ by several metres, so the hider should check their height here too. Borderline spots, within ${TOL} m of your height, stay in play. On the map, the dashed line is your height and the shaded side is lower.</p>`;
+    const q = (s) => el.querySelector(s);
+    q(".msea-retry button").onclick = () => { gFail = 0; need(); syncPanels(); };
+    const answer = (ans) => {
+      const s = cellAt(draft.askC); if (!s) return;
+      add({ type: T, c: draft.askC.slice(), lo: Math.round(s.lo * 10) / 10, hi: Math.round(s.hi * 10) / 10, ans });
+      drawDraft(); syncPanels();
+    };
+    q(".msea-closer").onclick = () => answer("closer");
+    q(".msea-further").onclick = () => answer("further");
+    hooks.sync.push(() => {
+      if (currentTab === "measure") need();
+      const info = q(".msea-info"), s = cellAt(draft.askC);
+      q(".msea-retry").hidden = !(gFail && !G);
+      if (!G) info.textContent = gFail && !gP ? "Couldn't load the height map. Check your connection and try again." : "Loading the height map…";
+      else if (!draft.askC) info.textContent = "Set where you are asking from.";
+      else if (!s) info.textContent = "That spot is outside the height map, which covers the hiding zones and 1 km around them.";
+      else info.textContent = `Your ground is about ${fmtH(s.mid)} above sea level${s.hi - s.lo >= 1 ? ` (${s.lo.toFixed(1)} to ${s.hi.toFixed(1)} m within 25 m)` : ""}. Closer keeps ground up to about ${fmtH(s.hi + TOL)}, further keeps ground from about ${fmtH(s.lo - TOL)} up.`;
+      q(".msea-closer").disabled = q(".msea-further").disabled = !s;
+      q(".msea-closer").textContent = s ? "Closer (lower)" : "Closer";
+      q(".msea-further").textContent = s ? "Further (higher)" : "Further";
+    });
+    // Preview: the contour at the seekers' height (dashed) with the lower side lightly shaded, and their height as a label.
+    hooks.draft.push((tab, layer) => {
+      if (!subjectOn("measure", "sea") || !draft.askC) return;
+      const s = cellAt(draft.askC); if (!s) return;
+      const pane = "draft", mp = within("mid", s.mid, false);
+      if (mp && mp.length) {
+        L.polygon(toLL(mp), { pane, stroke: false, fillColor: "#1d3f94", fillOpacity: 0.1, interactive: false }).addTo(layer);
+        L.polyline(outlineLL(mp), { pane, color: "#1d3f94", weight: 2.5, dashArray: "8 6", interactive: false }).addTo(layer);
+      }
+      L.circleMarker(draft.askC, { pane, radius: 1, opacity: 0, fillOpacity: 0, interactive: false })
+        .bindTooltip(fmtH(s.mid), { permanent: true, direction: "right", offset: [12, 0], className: "ms-near" }).addTo(layer);
+    });
+  }
+  // ===== end: measure-sea =====
 
   // ===== feature: poi =====
   // Places of interest for Matching ("Is your nearest ___ the same as mine?"), Measuring ("Compared to me, are
