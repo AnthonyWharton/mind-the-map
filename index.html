@@ -137,6 +137,11 @@ details > *:not(summary) { margin-top: 8px; }
 .mn-same b { color: var(--ink); font-weight: 600; }
 /* ===== end css: match-name ===== */
 
+/* ===== feature css: match-street ===== */
+#ms-sel { flex: 1; min-width: 0; }
+.leaflet-tooltip.ms-dist { background: #1d3f94; color: #fff; border: 0; font: 600 12px var(--font-body); padding: 1px 6px; box-shadow: none; }
+/* ===== end css: match-street ===== */
+
 /* ===== feature css: admin ===== */
 .adm-q { color: var(--ink); font-weight: 500; }
 .adm-name { color: var(--ink); font-weight: 600; }
@@ -1493,6 +1498,371 @@ details > *:not(summary) { margin-top: 8px; }
     });
   })();
   // ===== end: match-name =====
+
+  // ===== feature: match-street =====
+  // Matching: "Is your nearest street or path the same as my nearest street or path?"
+  // Data: data/match-streets.json, baked once from OpenStreetMap through the Overpass API (© OpenStreetMap
+  // contributors, ODbL 1.0) by data/street-build/ (fetch.sh, then build.js, which spells out the inclusion rule).
+  // In short: named highway=* roads, pedestrian streets, alleys, mews, steps, footpaths, park paths and towpaths;
+  // not tunnels, indoor walkways, platforms or parking aisles; named pavements (footway=sidewalk) only where no road
+  // of that name is beside them. Pedestrian squares mapped as areas count as distance 0 inside. Unnamed paths are
+  // left out entirely. Pieces with the same name within 200 m of each other are one street. Covers every hiding
+  // zone plus 400 m; the farthest any zone point is from a named street is stored as dmax (about 275 m, in Hyde Park).
+  // Format: { cover, dmax, s: [[name, lines, areas?], ...] }, polylines delta-coded in 1e-5 degrees.
+  //
+  // Region: f = (distance to the chosen street) − (distance to the nearest other street), measured to centrelines.
+  // Yes keeps f <= MS_TOL (+ slack), and also counts other streets with the same name elsewhere as "the same", in case
+  // the hider does. No removes only f < −MS_TOL (− slack): where the chosen street is nearer than every other by more
+  // than the tolerance. f is sampled on a 5 m grid, only inside the hiding zones and only near the street (blocks that
+  // can't qualify are skipped), using a bucket index of segments; the boundary is traced with marching squares.
+  // Answer: { type: "match-street", name, key, ref: [lat, lon] (nearest point of the street), c, d, ans: "same" | "diff" }
+  (() => {
+    const MS_TOL = 12;     // metres: centrelines are approximate, so streets this close to a tie count either way
+    const MS_SLACK = 4;    // extra give for grid sampling and simplification, always on the side of keeping area
+    const MS_C = 5, MS_B = 8, MS_CAP = 40, MS_BK = 50, MS_SIMP = 1, MS_TOP = 8;
+    const MS_HD = MS_B * MS_C * Math.SQRT1_2; // farther than any grid point of a block is from the block's centre
+    const msNorm = (s) => s.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[’'`.,]/g, "").replace(/&/g, " and ").replace(/\s+/g, " ").trim();
+    let S = null, msFailed = false;
+    map.attributionControl.addAttribution('Streets and paths: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors (ODbL)');
+
+    function msDecode(raw) {
+      const dec = (arr) => { const out = []; let a = 0, b = 0; for (let i = 0; i + 1 < arr.length; i += 2) { a += arr[i]; b += arr[i + 1]; out.push(proj(a / 1e5, b / 1e5)); } return out; };
+      const groups = [], segA = [], segG = [], areas = [], byKey = new Map();
+      raw.s.forEach(([n, lines, rings], gi) => {
+        const ls = lines.map(dec).filter((l) => l.length), rs = (rings || []).map(dec).filter((r) => r.length >= 3).map((r) => r.concat([r[0].slice()]));
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (const l of ls.concat(rs)) for (const [x, y] of l) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+        const g = { n, key: msNorm(n), lines: ls, rings: rs, bb: [x0, y0, x1, y1], s0: segG.length, s1: 0 };
+        for (const l of ls) {
+          if (l.length === 1) { segA.push(l[0][0], l[0][1], l[0][0], l[0][1]); segG.push(gi); }
+          for (let i = 1; i < l.length; i++) { segA.push(l[i - 1][0], l[i - 1][1], l[i][0], l[i][1]); segG.push(gi); }
+        }
+        for (const r of rs) for (let i = 1; i < r.length; i++) { segA.push(r[i - 1][0], r[i - 1][1], r[i][0], r[i][1]); segG.push(gi); }
+        g.s1 = segG.length;
+        if (rs.length) { let a0 = Infinity, b0 = Infinity, a1 = -Infinity, b1 = -Infinity; for (const r of rs) for (const [x, y] of r) { if (x < a0) a0 = x; if (x > a1) a1 = x; if (y < b0) b0 = y; if (y > b1) b1 = y; } areas.push({ g: gi, rings: rs, bb: [a0, b0, a1, b1] }); }
+        groups.push(g);
+        if (!byKey.has(g.key)) byKey.set(g.key, []);
+        byKey.get(g.key).push(gi);
+      });
+      const SG = Float64Array.from(segA), SGg = Int32Array.from(segG), NS = SGg.length;
+      // Bucket index: every segment is listed in each MS_BK-metre bucket its bounding box touches.
+      let X0 = Infinity, Y0 = Infinity, X1 = -Infinity, Y1 = -Infinity;
+      for (let k = 0; k < NS; k++) for (const o of [0, 2]) { const x = SG[4 * k + o], y = SG[4 * k + o + 1]; if (x < X0) X0 = x; if (x > X1) X1 = x; if (y < Y0) Y0 = y; if (y > Y1) Y1 = y; }
+      const nbx = Math.floor((X1 - X0) / MS_BK) + 1, nby = Math.floor((Y1 - Y0) / MS_BK) + 1, BS = new Int32Array(nbx * nby + 1);
+      const span = (k, f) => {
+        const o = 4 * k, i0 = Math.floor((Math.min(SG[o], SG[o + 2]) - X0) / MS_BK), i1 = Math.floor((Math.max(SG[o], SG[o + 2]) - X0) / MS_BK);
+        const j0 = Math.floor((Math.min(SG[o + 1], SG[o + 3]) - Y0) / MS_BK), j1 = Math.floor((Math.max(SG[o + 1], SG[o + 3]) - Y0) / MS_BK);
+        for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) f(j * nbx + i);
+      };
+      for (let k = 0; k < NS; k++) span(k, (b) => { BS[b + 1]++; });
+      for (let b = 0; b < nbx * nby; b++) BS[b + 1] += BS[b];
+      const fill = BS.slice(0, -1), BI = new Int32Array(BS[nbx * nby]);
+      for (let k = 0; k < NS; k++) span(k, (b) => { BI[fill[b]++] = k; });
+      return { groups, areas, byKey, SG, SGg, NS, X0, Y0, nbx, nby, BS, BI, stamp: new Int32Array(NS), epoch: 0, dmax: raw.dmax || 300, cover: raw.cover || 900 };
+    }
+    const sd = (px, py, k) => {
+      const SG = S.SG, o = 4 * k, ax = SG[o], ay = SG[o + 1], dx = SG[o + 2] - ax, dy = SG[o + 3] - ay, L2 = dx * dx + dy * dy;
+      let t = L2 ? ((px - ax) * dx + (py - ay) * dy) / L2 : 0; t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const ex = px - ax - t * dx, ey = py - ay - t * dy; return Math.sqrt(ex * ex + ey * ey);
+    };
+    // Each segment within the box [x0, x1] × [y0, y1] (and some just outside), once.
+    const msEach = (x0, y0, x1, y1, f) => {
+      const { X0, Y0, nbx, nby, BS, BI, stamp } = S, ep = ++S.epoch;
+      const i0 = Math.max(0, Math.floor((x0 - X0) / MS_BK)), i1 = Math.min(nbx - 1, Math.floor((x1 - X0) / MS_BK));
+      const j0 = Math.max(0, Math.floor((y0 - Y0) / MS_BK)), j1 = Math.min(nby - 1, Math.floor((y1 - Y0) / MS_BK));
+      for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+        const b = j * nbx + i;
+        for (let q = BS[b], qe = BS[b + 1]; q < qe; q++) { const k = BI[q]; if (stamp[k] !== ep) { stamp[k] = ep; f(k); } }
+      }
+    };
+    const inRings = (x, y, rings) => { let c = false; for (const r of rings) if (pointInRing([x, y], r)) c = !c; return c; };
+    const areasAt = (x, y, f) => { for (const a of S.areas) if (x >= a.bb[0] && x <= a.bb[2] && y >= a.bb[1] && y <= a.bb[3] && inRings(x, y, a.rings)) f(a.g); };
+    // Distance from (x, y) to the nearest street of any kind.
+    const msNearAny = (x, y) => {
+      let inside = false; areasAt(x, y, () => { inside = true; }); if (inside) return 0;
+      for (let r = MS_BK; ; r *= 2) {
+        let d = Infinity; msEach(x - r, y - r, x + r, y + r, (k) => { const v = sd(x, y, k); if (v < d) d = v; });
+        if (d <= r || r > 4 * S.cover) return d;
+      }
+    };
+    // Streets near [lat, lng], nearest first: [{ g, d, q (nearest point, projected) }].
+    const msRank = (ll) => {
+      const [px, py] = proj(ll[0], ll[1]);
+      for (let R = 200; ; R *= 2) {
+        const best = new Map();
+        msEach(px - R, py - R, px + R, py + R, (k) => {
+          const v = sd(px, py, k); if (v > R) return;
+          const g = S.SGg[k], b = best.get(g);
+          if (!b || v < b.d) best.set(g, { g, d: v, k });
+        });
+        areasAt(px, py, (g) => best.set(g, { g, d: 0, k: -1 }));
+        if (best.size >= MS_TOP || R >= 1600) {
+          return [...best.values()].sort((a, b) => a.d - b.d || S.groups[a.g].n.localeCompare(S.groups[b.g].n)).slice(0, MS_TOP).map((r) => {
+            let q = [px, py];
+            if (r.k >= 0) { const o = 4 * r.k, SG = S.SG, ax = SG[o], ay = SG[o + 1], dx = SG[o + 2] - ax, dy = SG[o + 3] - ay, L2 = dx * dx + dy * dy; let t = L2 ? ((px - ax) * dx + (py - ay) * dy) / L2 : 0; t = Math.max(0, Math.min(1, t)); q = [ax + t * dx, ay + t * dy]; }
+            return { g: r.g, d: r.d, q };
+          });
+        }
+      }
+    };
+    // The street an answer refers to: same name, nearest to the point recorded with it.
+    const msFind = (key, ref) => {
+      const list = S.byKey.get(key); if (!list || !list.length) return -1;
+      if (list.length === 1 || !ref) return list[0];
+      const [x, y] = proj(ref[0], ref[1]);
+      let best = list[0], bd = Infinity;
+      for (const g of list) { const G = S.groups[g]; for (let k = G.s0; k < G.s1; k++) { const v = sd(x, y, k); if (v < bd) { bd = v; best = g; } } }
+      return best;
+    };
+
+    // Douglas–Peucker for a closed ring (first point == last point).
+    const msSimplify = (r, tol) => {
+      if (r.length < 5) return r;
+      const keep = new Uint8Array(r.length); keep[0] = keep[r.length - 1] = 1;
+      let far = 1, fd = -1; for (let i = 1; i < r.length - 1; i++) { const d = Math.hypot(r[i][0] - r[0][0], r[i][1] - r[0][1]); if (d > fd) { fd = d; far = i; } }
+      keep[far] = 1;
+      const stack = [[0, far], [far, r.length - 1]];
+      while (stack.length) {
+        const [a, b] = stack.pop(); let mi = -1, md = tol;
+        for (let i = a + 1; i < b; i++) { const d = segDist(r[i], r[a], r[b]); if (d > md) { md = d; mi = i; } }
+        if (mi >= 0) { keep[mi] = 1; stack.push([a, mi], [mi, b]); }
+      }
+      return r.filter((p, i) => keep[i]);
+    };
+    const zoneR = (s) => Math.hypot(s.ring[0][0] - s.xy[0], s.ring[0][1] - s.xy[1]);
+
+    // Rings of { level − f > 0 } on one grid window (projected box w), f = d(set) − d(other streets), clamped to ±MS_CAP.
+    function msWindow(w, set, inSet, level) {
+      const C = MS_C, B = MS_B;
+      const x0 = Math.floor(w[0] / C) * C, y0 = Math.floor(w[1] / C) * C;
+      const nx = Math.ceil((w[2] - x0) / C) + 1, ny = Math.ceil((w[3] - y0) / C) + 1, N = nx * ny;
+      // Grid points within a hiding zone (+3 cells, so boundaries close just outside the zone); never the window edge.
+      const mask = new Uint8Array(N);
+      let anyZone = false;
+      for (const s of stations) {
+        const R = zoneR(s) + 3 * C, R2 = R * R, [sx, sy] = s.xy;
+        const i0 = Math.max(1, Math.floor((sx - R - x0) / C)), i1 = Math.min(nx - 2, Math.ceil((sx + R - x0) / C));
+        const j0 = Math.max(1, Math.floor((sy - R - y0) / C)), j1 = Math.min(ny - 2, Math.ceil((sy + R - y0) / C));
+        for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) { const dx = x0 + i * C - sx, dy = y0 + j * C - sy; if (dx * dx + dy * dy <= R2) { mask[j * nx + i] = 1; anyZone = true; } }
+      }
+      if (!anyZone) return [];
+      const g = new Float32Array(N).fill(-MS_CAP);
+      const setSegs = []; for (const gi of set) { const G = S.groups[gi]; for (let k = G.s0; k < G.s1; k++) setSegs.push(k); }
+      const setAreas = S.areas.filter((a) => inSet[a.g]);
+      const cand = [], nbx = Math.ceil(nx / B), nby = Math.ceil(ny / B), pos = Math.max(level, 0);
+      for (let bj = 0; bj < nby; bj++) for (let bi = 0; bi < nbx; bi++) {
+        const iA = bi * B, jA = bj * B, iB = Math.min(nx, iA + B), jB = Math.min(ny, jA + B);
+        let any = false;
+        for (let j = jA; j < jB && !any; j++) for (let i = iA; i < iB; i++) if (mask[j * nx + i]) { any = true; break; }
+        if (!any) continue;
+        const cx = x0 + (iA + (B - 1) / 2) * C, cy = y0 + (jA + (B - 1) / 2) * C;
+        // Nearest street of any kind, and nearest of the set, from the block's centre. If the set is too far behind
+        // (by more than the block's size can make up, plus the level), no point in the block can qualify.
+        const m = msNearAny(cx, cy);
+        let dc = Infinity;
+        for (const k of setSegs) { const v = sd(cx, cy, k); if (v < dc) dc = v; }
+        for (const a of setAreas) if (inRings(cx, cy, a.rings)) dc = 0;
+        if (dc - m > 2 * MS_HD + pos + 1) continue;
+        // Segments that can be within MS_CAP of the nearest street at any point of the block.
+        const lim = m + 2 * MS_HD + MS_CAP;
+        cand.length = 0;
+        msEach(cx - lim, cy - lim, cx + lim, cy + lim, (k) => { if (sd(cx, cy, k) <= lim) cand.push(k); });
+        const bx0 = x0 + iA * C - C, by0 = y0 + jA * C - C, bx1 = x0 + iB * C + C, by1 = y0 + jB * C + C;
+        const aCand = S.areas.filter((a) => a.bb[0] <= bx1 && a.bb[2] >= bx0 && a.bb[1] <= by1 && a.bb[3] >= by0);
+        for (let j = jA; j < jB; j++) for (let i = iA; i < iB; i++) {
+          const k = j * nx + i; if (!mask[k]) continue;
+          const px = x0 + i * C, py = y0 + j * C;
+          let dC = Infinity, dO = Infinity;
+          for (let q = 0; q < cand.length; q++) { const s = cand[q], v = sd(px, py, s); if (inSet[S.SGg[s]]) { if (v < dC) dC = v; } else if (v < dO) dO = v; }
+          for (const a of aCand) if (inRings(px, py, a.rings)) { if (inSet[a.g]) dC = 0; else dO = 0; }
+          let f = dC - dO; f = f > MS_CAP ? MS_CAP : f < -MS_CAP ? -MS_CAP : f !== f ? MS_CAP : f;
+          g[k] = level - f;
+        }
+      }
+      // Marching squares. Edge ids: horizontal edge from point k to k+1 is k; vertical edge from k to k+nx is N+k.
+      const A1 = new Map(), A2 = new Map();
+      const link = (p, q) => { (A1.has(p) ? A2 : A1).set(p, q); (A1.has(q) ? A2 : A1).set(q, p); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const k = j * nx + i, ga = g[k], gb = g[k + 1], gc = g[k + nx + 1], gd = g[k + nx];
+        const cs = (ga > 0 ? 1 : 0) | (gb > 0 ? 2 : 0) | (gc > 0 ? 4 : 0) | (gd > 0 ? 8 : 0);
+        if (cs === 0 || cs === 15) continue;
+        const e0 = k, e1 = N + k + 1, e2 = k + nx, e3 = N + k, mid = ga + gb + gc + gd > 0;
+        switch (cs) {
+          case 1: case 14: link(e3, e0); break;
+          case 2: case 13: link(e0, e1); break;
+          case 3: case 12: link(e3, e1); break;
+          case 4: case 11: link(e1, e2); break;
+          case 6: case 9: link(e0, e2); break;
+          case 7: case 8: link(e2, e3); break;
+          case 5: if (mid) { link(e0, e1); link(e2, e3); } else { link(e3, e0); link(e1, e2); } break;
+          case 10: if (mid) { link(e3, e0); link(e1, e2); } else { link(e0, e1); link(e2, e3); } break;
+        }
+      }
+      const pt = (id) => {
+        const v = id >= N, k = v ? id - N : id, k2 = v ? k + nx : k + 1, j = (k / nx) | 0, i = k - j * nx;
+        let t = g[k] / (g[k] - g[k2]); t = t < 0.001 ? 0.001 : t > 0.999 ? 0.999 : t;
+        return [x0 + i * C + (v ? 0 : t * C), y0 + j * C + (v ? t * C : 0)];
+      };
+      const seen = new Set(), polys = [];
+      for (const s of A1.keys()) {
+        if (seen.has(s)) continue;
+        const ring = []; let cur = s;
+        while (cur !== undefined && !seen.has(cur)) {
+          seen.add(cur); ring.push(pt(cur));
+          const a = A1.get(cur), b = A2.get(cur); cur = a !== undefined && !seen.has(a) ? a : b !== undefined && !seen.has(b) ? b : undefined;
+        }
+        if (ring.length < 3) continue;
+        ring.push(ring[0].slice());
+        const r = msSimplify(ring, MS_SIMP);
+        if (r.length >= 4 && Math.abs(ringArea(r)) > 1) polys.push([r]);
+      }
+      if (!polys.length) return [];
+      // Rings never cross, so XOR of all of them gives islands with their holes.
+      try { return pc.xor(...polys); } catch (e) {
+        try { return pc.xor(...snapMulti(polys)); } catch (e2) { console.warn("match-street: region failed", e2); return null; }
+      }
+    }
+
+    // Region { level − f > 0 } for a set of streets (group ids), as a projected multipolygon; null if it failed.
+    const msRegions = new Map(), msTimes = [];
+    function msRegion(set, level) {
+      const key = set.slice().sort((a, b) => a - b).join(",") + "|" + level;
+      if (msRegions.has(key)) return msRegions.get(key);
+      const t0 = performance.now();
+      const inSet = new Uint8Array(S.groups.length); set.forEach((gi) => { inSet[gi] = 1; });
+      // Only points within W of the set can qualify: d(set) <= d(any) + level, and d(any) <= dmax inside the zones
+      // (plus a little for the 3-cell rim and the 10 m sampling dmax was checked on).
+      const W = S.dmax + 40 + Math.max(level, 0);
+      let wins = set.map((gi) => { const b = S.groups[gi].bb; return [b[0] - W, b[1] - W, b[2] + W, b[3] + W]; });
+      // Merge overlapping windows, so the windows (and their regions) never overlap.
+      for (let again = true; again;) {
+        again = false;
+        outer: for (let a = 0; a < wins.length; a++) for (let b = a + 1; b < wins.length; b++) {
+          const p = wins[a], q = wins[b];
+          if (p[0] <= q[2] && q[0] <= p[2] && p[1] <= q[3] && q[1] <= p[3]) {
+            wins[a] = [Math.min(p[0], q[0]), Math.min(p[1], q[1]), Math.max(p[2], q[2]), Math.max(p[3], q[3])]; wins.splice(b, 1); again = true; break outer;
+          }
+        }
+      }
+      let out = [];
+      for (const w of wins) { const r = msWindow(w, set, inSet, level); if (!r) { out = null; break; } out.push(...r); }
+      msRegions.set(key, out);
+      msTimes.push({ key, ms: Math.round(performance.now() - t0) });
+      return out;
+    }
+    const msLevel = (ans) => (ans === "same" ? 1 : -1) * (MS_TOL + MS_SLACK);
+    // The set an answer is about: Yes counts every street of that name; No only the one picked.
+    const msSetFor = (gi, ans) => (ans === "same" ? S.byKey.get(S.groups[gi].key) : [gi]);
+    const BIG = (() => { const [p, q] = [proj(51.2, -0.6), proj(51.8, 0.4)]; return [[boxRing(p[0], p[1], q[0], q[1])]]; })();
+    const msFailedIds = new Set();
+    const msKeep = (c) => {
+      if (!S) return null;
+      const gi = msFind(c.key, c.ref);
+      if (gi < 0) { msFailedIds.add(c.id); return c.ans === "same" ? BIG : []; } // street not in the data: rule nothing out
+      const r = msRegion(msSetFor(gi, c.ans), msLevel(c.ans));
+      if (!r) { msFailedIds.add(c.id); return c.ans === "same" ? BIG : []; } // couldn't trace it: rule nothing out
+      return r;
+    };
+
+    QTYPES["match-street"] = {
+      region: (c) => msKeep(c),
+      keeps: (c) => c.ans === "same",
+      describe: (c) => ({ t: `Nearest street or path: ${c.name}${c.c ? `, from ${placeName(c.c)}` : ""}${msFailedIds.has(c.id) ? " (couldn't work out the area, so nothing was ruled out)" : ""}`, a: c.ans === "same" ? "Same street" : "Different street", ok: c.ans === "same" }),
+      outline: (c, st, layer) => {
+        if (!S) return;
+        const g = regionCache.get(c.id);
+        if (g && g.length && g !== BIG) L.polygon(toLL(g), st).addTo(layer);
+        const gi = msFind(c.key, c.ref);
+        if (gi >= 0) msLines(gi).forEach((l) => L.polyline(l, { ...st, weight: 2.5, opacity: 0.8 }).addTo(layer));
+      },
+      _test: { get S() { return S; }, msRank, msRegion, msFind, msSetFor, msLevel, msNearAny, msTimes, MS_TOL, MS_SLACK },
+    };
+    const msLines = (gi) => { const G = S.groups[gi]; return G.lines.concat(G.rings).map((l) => l.map(([x, y]) => unproj(x, y))); };
+
+    // ---- Match tab UI ----
+    const ms = { at: undefined, data: null, rank: null, g: -1 };
+    const body = addSubject("match", "street", "Street or path");
+    body.innerHTML = `
+      <p class="hint" id="ms-near">Set where you are asking from to find your nearest street or path.</p>
+      <div class="row"><label for="ms-sel">Your street</label><select id="ms-sel" disabled><option value="">Set where you are asking from</option></select></div>
+      <div class="answers"><button type="button" class="yes" id="ms-yes" disabled>Yes, same street</button><button type="button" class="no" id="ms-no" disabled>No, different</button></div>
+      <p class="hint" id="ms-shade"></p>
+      <p class="hint">Named streets and paths from OpenStreetMap: roads, pedestrian streets, alleys, mews, steps and named footpaths (in parks too). Unnamed paths are ignored, so in a park your nearest may be a named path some way off. Tunnels and indoor walkways don't count. Distances are to the middle of the street, so where another street is within ${MS_TOL} m of a tie, Yes keeps the spot and No doesn't rule it out. Yes also keeps spots nearest another street of the same name elsewhere.</p>`;
+    const sel = body.querySelector("#ms-sel");
+    const label = (r, dup) => `${S.groups[r.g].n}${dup ? ` (near ${placeName(unproj(r.q[0], r.q[1])).replace(/^near /, "")})` : ""}`;
+    const fillSelect = () => {
+      if (!ms.rank || !ms.rank.length) { sel.innerHTML = `<option value="">${ms.data ? "Set where you are asking from" : "Loading streets…"}</option>`; sel.disabled = true; return; }
+      const keys = ms.rank.map((r) => S.groups[r.g].key);
+      sel.innerHTML = ms.rank.map((r, i) => `<option value="${r.g}">${esc(label(r, keys.indexOf(keys[i]) !== keys.lastIndexOf(keys[i])))} · ${esc(fmtD(r.d))}</option>`).join("");
+      sel.disabled = false; sel.value = String(ms.g);
+    };
+    sel.addEventListener("change", () => { ms.g = +sel.value; drawDraft(); syncPanels(); });
+    hooks.sync.push(() => {
+      if (draft.askC !== ms.at || S !== ms.data) {
+        ms.at = draft.askC; ms.data = S;
+        ms.rank = S && ms.at ? msRank(ms.at) : null;
+        const was = ms.g;
+        ms.g = ms.rank && ms.rank.length ? ms.rank[0].g : -1;
+        fillSelect();
+        if (ms.g !== was) drawDraft(); // setPoint draws before it syncs, so redraw for the new street
+      }
+      const near = body.querySelector("#ms-near"), r0 = ms.rank && ms.rank[0];
+      const ok = ms.g >= 0 && !!draft.askC;
+      body.querySelector("#ms-yes").disabled = body.querySelector("#ms-no").disabled = !ok;
+      if (!S) near.textContent = msFailed ? "Street data didn't load. Refresh to try again." : "Loading streets…";
+      else if (!draft.askC) near.textContent = "Set where you are asking from to find your nearest street or path.";
+      else if (!r0) near.textContent = "No named street in the data near here: it only covers the hiding zones and a little around them.";
+      else {
+        const tied = ms.rank.filter((r) => r.d <= r0.d + MS_TOL && r.g !== r0.g).map((r) => S.groups[r.g].n);
+        // The data holds every street within S.cover of a station, so it's complete within (cover − station distance).
+        const far = r0.d > S.cover - nearest(draft.askC).d ? " You're outside the area the street data covers, so check this on a map." : "";
+        near.innerHTML = `Your nearest named street or path is <b>${esc(S.groups[r0.g].n)}</b>, ${esc(fmtD(r0.d))} away.` +
+          (tied.length ? ` ${esc(tied.join(", "))} ${tied.length === 1 ? "is" : "are"} within ${MS_TOL} m of that, so pick the one you named.` : " Not what you'd call it? Pick the one you named.") + esc(far);
+      }
+      body.querySelector("#ms-shade").textContent = ok ? `Shaded: where ${S.groups[ms.g].n} is the nearest street (within ${MS_TOL} m), inside the hiding zones.` : "";
+    });
+    const msAnswer = (ans) => {
+      if (ms.g < 0 || !draft.askC || !ms.rank) return;
+      const r = ms.rank.find((x) => x.g === ms.g); if (!r) return;
+      const G = S.groups[ms.g], ref = unproj(r.q[0], r.q[1]).map((v) => Math.round(v * 1e6) / 1e6);
+      add({ type: "match-street", name: G.n, key: G.key, ref, c: draft.askC.slice(), d: Math.round(r.d), ans });
+      drawDraft(); syncPanels();
+    };
+    body.querySelector("#ms-yes").onclick = () => msAnswer("same");
+    body.querySelector("#ms-no").onclick = () => msAnswer("diff");
+
+    // Preview: the chosen street, a line to its nearest point, and (once worked out) where it's the nearest street.
+    let msPending = false;
+    const msShade = new Map();
+    hooks.draft.push((tab, layer) => {
+      if (!subjectOn("match", "street") || !S || ms.g < 0 || !ms.rank) return;
+      const gi = ms.g, col = "#1d3f94", set = msSetFor(gi, "same"), key = set.join(",");
+      if (msShade.has(key)) {
+        const m = msShade.get(key);
+        if (m && m.length) L.polygon(m, { pane: "cons", color: col, weight: 1, opacity: 0.7, fillColor: col, fillOpacity: 0.18, interactive: false }).addTo(layer);
+      } else if (!msPending) {
+        msPending = true;
+        setTimeout(() => {
+          try { const m = msRegion(set, msLevel("same")); msShade.set(key, m ? toLL(m) : []); } catch (e) { console.warn("match-street: preview failed", e); msShade.set(key, []); }
+          msPending = false; if (subjectOn("match", "street")) drawDraft();
+        }, 30);
+      }
+      set.filter((x) => x !== gi).forEach((x) => msLines(x).forEach((l) => L.polyline(l, { pane: "cons", color: col, weight: 3, opacity: 0.6, dashArray: "4 4", interactive: false }).addTo(layer)));
+      const G = S.groups[gi];
+      if (G.rings.length) L.polygon(G.rings.map((r) => r.map(([x, y]) => unproj(x, y))), { pane: "cons", color: col, weight: 2, fillColor: col, fillOpacity: 0.25, interactive: false }).addTo(layer);
+      msLines(gi).forEach((l) => L.polyline(l, { pane: "cons", color: "#ffffff", weight: 10, opacity: 0.9, interactive: false }).addTo(layer));
+      msLines(gi).forEach((l) => L.polyline(l, { pane: "cons", color: col, weight: 5, opacity: 1, interactive: false }).addTo(layer));
+      const r = ms.rank.find((x) => x.g === gi);
+      if (r && draft.askC && r.d > 1) L.polyline([draft.askC, unproj(r.q[0], r.q[1])], { pane: "draft", color: col, weight: 2.5, dashArray: "2 6", interactive: false })
+        .bindTooltip(fmtD(r.d), { permanent: true, direction: "center", className: "ms-dist" }).addTo(layer);
+    });
+
+    loadJSON("data/match-streets.json").then((raw) => {
+      S = msDecode(raw);
+      render(); drawDraft(); syncPanels();
+    }).catch((e) => { console.warn("match-street: data didn't load", e); msFailed = true; syncPanels(); });
+  })();
+  // ===== end: match-street =====
 
   // ===== feature: admin =====
   // Administrative divisions, as defined for London games: 1st = north or south of the Thames,

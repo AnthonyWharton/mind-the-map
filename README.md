@@ -6,7 +6,7 @@ It shows every Zone 1 tube station with its 500 m hiding zone, and gives seekers
 
 - **Radar**: "are you within X of me?" (0.5, 1, 2 or 5 km, or any distance) from your GPS position or any point
 - **Thermometer**: hotter or colder after moving from A to B, with progress towards 1 km and 5 km
-- **Match**: "is your nearest ___ the same as mine?" for transit line, station name length, river side (north/south), borough, ward and places (museums, libraries, cinemas, hospitals, parks, embassies and more)
+- **Match**: "is your nearest ___ the same as mine?" for transit line, station name length, street or path, river side (north/south), borough, ward and places (museums, libraries, cinemas, hospitals, parks, embassies and more)
 - **Measure**: "are you closer to or further from ___ than me?" for the Thames (optionally lakes, canals and docks), rail stations, the river and borough borders, and the same places
 - **Draw**: outline any area and say whether the hider is inside or outside it (for photos and anything else)
 - **Stations**: rule individual stations out by hand, and open any station in Google Maps
@@ -24,5 +24,6 @@ Data for the newer questions is pre-built into `data/`:
 - `admin-divisions.json`: wards and boroughs from the ONS Open Geography Portal (Open Government Licence)
 - `measure-thames-water.json`, `measure-station-rail.json`, `poi-places.json`: water, rail stations and places from OpenStreetMap (ODbL); `poi-build/` rebuilds the places
 - `match-name-stations.json`: Zone 2 stations near Zone 1, from the same TfL data
+- `match-streets.json`: named streets and paths around the hiding zones from OpenStreetMap (ODbL); `street-build/` rebuilds it
 
 Street map © OpenStreetMap contributors. Boundaries contain National Statistics and OS data © Crown copyright and database right.
