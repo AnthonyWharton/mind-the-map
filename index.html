@@ -351,75 +351,80 @@ details > *:not(summary) { margin-top: 8px; }
   const COLORS = { "Bakerloo": "B36305", "Central": "E32017", "Circle": "FFD300", "District": "00782A", "Hammersmith & City": "F3A9BB", "Jubilee": "A0A5A9", "Metropolitan": "9B0056", "Northern": "000000", "Piccadilly": "003688", "Victoria": "0098D4", "Waterloo & City": "95CDBA" };
   // The source predates the Northern line extension's rezoning.
   const ZONE_FIX = { "Nine Elms": "1", "Battersea Power Station": "1", "Kennington": "1/2" };
-  // Used for outbound Maps links. Pins and game zones use the TfL coordinates.
-  const GOOGLE_PLACE_IDS = new Map(Object.entries({
-    "Aldgate": "ChIJxx7AWksDdkgRU7ET2gD2t1c",
-    "Aldgate East": "ChIJCSwENLUcdkgRcxY424ZbDSM",
-    "Angel": "ChIJW6zsMkMbdkgRzuXW6seMAtQ",
-    "Baker Street": "ChIJlQh0H88adkgRT1sjAmMXQt4",
-    "Bank": "ChIJTUEYl1QDdkgRYE1YHRnIiFY",
-    "Barbican": "ChIJ1YzjnVYbdkgRKyhyc4zDkcg",
-    "Battersea Power Station": "ChIJv5utaQIFdkgRMK5YyBburCM",
-    "Bayswater": "ChIJKZyRf1UFdkgR3epMaeDsjto",
-    "Blackfriars": "ChIJgWfuuq0EdkgRMx1fYiZTGKE",
-    "Bond Street": "ChIJn8Ps1ywFdkgRJcpkcuK0o0c",
-    "Borough": "ChIJveMeg1gDdkgRXwphFYUtm6g",
-    "Cannon Street": "ChIJ_09VT1QDdkgRyPwk2CL0uSU",
-    "Chancery Lane": "ChIJRSD_d0wbdkgR_P_OkhjyyEM",
-    "Charing Cross": "ChIJra2jTs4EdkgRshPsDJz8OM0",
-    "Covent Garden": "ChIJT2mIkcwEdkgRYspzsBq1iAM",
-    "Earl's Court": "ChIJTYFlZIsPdkgRNvh8Ud9OzLg",
-    "Edgware Road (Bakerloo)": "ChIJN2AzqrYadkgRMtuiUnUghW0",
-    "Edgware Road (Circle/District/H&C)": "ChIJa8XkK7QadkgRHMVnJoLcIeo",
-    "Elephant & Castle": "ChIJI9JoOqIEdkgRm1W33pepbrs",
-    "Embankment": "ChIJ85vnMskEdkgRizGhXNN3k6o",
-    "Euston": "ChIJNVch-SMbdkgRqv1PBlyKQqU",
-    "Euston Square": "ChIJdTDfAiYbdkgRDjpEjH8RSnI",
-    "Farringdon": "ChIJp7R9HVIbdkgRkHSxz54Qxjw",
-    "Gloucester Road": "ChIJY2zjBF4FdkgRBITPvkNYBho",
-    "Goodge Street": "ChIJXS6NpS4bdkgR7_EhEFlacW8",
-    "Great Portland Street": "ChIJkVboC9cadkgRYOzinfJX7Pw",
-    "Green Park": "ChIJQRZgSygFdkgRrZelNQQCpf8",
-    "High Street Kensington": "ChIJgR1T2_YPdkgRox0xsHKJEWQ",
-    "Holborn": "ChIJr11YVTQbdkgRhY0V1HABqq8",
-    "Hyde Park Corner": "ChIJP3ORNSUFdkgRH5WN6MNz4a8",
-    "Kennington": "ChIJl55TqZAEdkgRCqQtpLZu6r0",
-    "King's Cross St Pancras": "ChIJx4FA-TsbdkgR0KLHklorYXw",
-    "Knightsbridge": "ChIJZ6O_CTkFdkgROFMJInuosD8",
-    "Lambeth North": "ChIJvwo7q74EdkgRezYeI2NSMCs",
-    "Lancaster Gate": "ChIJgZ_amk0FdkgRTyJanN2L1wM",
-    "Leicester Square": "ChIJ98Dokc0EdkgRy3-ajwvdD94",
-    "Liverpool Street": "ChIJJ1jodq0cdkgRj7HA-vwxEHs",
-    "London Bridge": "ChIJYc1mdQADdkgR54U5sTM1psA",
-    "Mansion House": "ChIJLw7CfqoEdkgRLl2SJ9DRW-8",
-    "Marble Arch": "ChIJX_jXnjQFdkgRSPraYlz1cmQ",
-    "Marylebone": "ChIJF7F7yskadkgRt_orhoI4_wE",
-    "Monument": "ChIJ64ml6lMDdkgR63qQmSJ5wUM",
-    "Moorgate": "ChIJEWNLkKscdkgRaKnhSHUvRNo",
-    "Nine Elms": "ChIJxb9PmvAEdkgRcPtq-xeSQAQ",
-    "Notting Hill Gate": "ChIJAZ58j_sPdkgRCy7yBmysnHA",
-    "Old Street": "ChIJzREMBKYcdkgRT9taU6biunM",
-    "Oxford Circus": "ChIJe9DRTdUadkgRAlFpoUrfj0c",
-    "Paddington": "ChIJpwBVsLIadkgRE767cq0HnXQ",
-    "Piccadilly Circus": "ChIJvVRe4NMEdkgRw3WgQO_J9KM",
-    "Pimlico": "ChIJuWi7o-YEdkgRuUKA7QR2BYU",
-    "Queensway": "ChIJoQGb71UFdkgR80plpHYwwRc",
-    "Regent's Park": "ChIJqSNDLtcadkgR-uG7QjdJuN0",
-    "Russell Square": "ChIJc1H-2DAbdkgREGJoCFlabM8",
-    "Sloane Square": "ChIJX4cORhYFdkgRdaAZPP16Y8w",
-    "South Kensington": "ChIJ91cwg0IFdkgR18p5WmlWiTY",
-    "Southwark": "ChIJGfGBUKUEdkgRSTEeQf5Ux-U",
-    "St James's Park": "ChIJjb5P89sEdkgR6gnY-YukPug",
-    "St Paul's": "ChIJY4RoLasEdkgR5J8vMW-DN1g",
-    "Temple": "ChIJgwqKNbQEdkgRIfMC9qy8GJg",
-    "Tottenham Court Road": "ChIJUwzMay0bdkgR2il_ihMRcME",
-    "Tower Hill": "ChIJYRsYAUwDdkgRWD9yGC0gqek",
-    "Vauxhall": "ChIJ8YCOY-4EdkgR1BkL52PYoQg",
-    "Victoria": "ChIJ1QGgyiEFdkgRYIJN91D0KTI",
-    "Warren Street": "ChIJj-hXfCgbdkgRWewwuunWzdg",
-    "Waterloo": "ChIJF4o0NLgEdkgRjBPR6vZ4dsg",
-    "Westminster": "ChIJ0160ScQEdkgR3zgV673t8yU"
+  // Coordinates and Place IDs from the supplied London Zone 1 station CSV.
+  const STATION_PINS = new Map(Object.entries({
+    "Aldgate": {"lat": 51.5141643, "lon": -0.0755189, "placeId": "ChIJxx7AWksDdkgRU7ET2gD2t1c"},
+    "Aldgate East": {"lat": 51.5155036, "lon": -0.07096, "placeId": "ChIJ_7Q5M7UcdkgRCv-7nswC520"},
+    "Angel": {"lat": 51.532249, "lon": -0.106029, "placeId": "ChIJW6zsMkMbdkgRzuXW6seMAtQ"},
+    "Baker Street": {"lat": 51.5231548, "lon": -0.156863, "placeId": "ChIJlQh0H88adkgRT1sjAmMXQt4"},
+    "Bank": {"lat": 51.5133643, "lon": -0.0888847, "placeId": "ChIJTUEYl1QDdkgRYE1YHRnIiFY"},
+    "Barbican": {"lat": 51.5202192, "lon": -0.0976771, "placeId": "ChIJ1YzjnVYbdkgRKyhyc4zDkcg"},
+    "Battersea Power Station": {"lat": 51.4798354, "lon": -0.1424659, "placeId": "ChIJv5utaQIFdkgRMK5YyBburCM"},
+    "Bayswater": {"lat": 51.5123525, "lon": -0.1877694, "placeId": "ChIJKZyRf1UFdkgR3epMaeDsjto"},
+    "Blackfriars": {"lat": 51.5116896, "lon": -0.1037939, "placeId": "ChIJgWfuuq0EdkgRMx1fYiZTGKE"},
+    "Bond Street": {"lat": 51.5143352, "lon": -0.1488549, "placeId": "ChIJn8Ps1ywFdkgRJcpkcuK0o0c"},
+    "Borough": {"lat": 51.5012449, "lon": -0.0936138, "placeId": "ChIJveMeg1gDdkgRXwphFYUtm6g"},
+    "Cannon Street": {"lat": 51.5110809, "lon": -0.0903503, "placeId": "ChIJ_09VT1QDdkgRyPwk2CL0uSU"},
+    "Chancery Lane": {"lat": 51.5182078, "lon": -0.1114438, "placeId": "ChIJRSD_d0wbdkgR_P_OkhjyyEM"},
+    "Charing Cross": {"lat": 51.5082971, "lon": -0.125542, "placeId": "ChIJra2jTs4EdkgRshPsDJz8OM0"},
+    "Covent Garden": {"lat": 51.5130007, "lon": -0.1241621, "placeId": "ChIJT2mIkcwEdkgRYspzsBq1iAM"},
+    "Earl's Court": {"lat": 51.4915767, "lon": -0.1938947, "placeId": "ChIJTYFlZIsPdkgRNvh8Ud9OzLg"},
+    "Edgware Road (Bakerloo)": {"lat": 51.5202914, "lon": -0.1701944, "placeId": "ChIJN2AzqrYadkgRMtuiUnUghW0"},
+    "Edgware Road (Circle/District/H&C)": {"lat": 51.5198825, "lon": -0.1678336, "placeId": "ChIJa8XkK7QadkgRHMVnJoLcIeo"},
+    "Elephant & Castle": {"lat": 51.4946011, "lon": -0.100329, "placeId": "ChIJI9JoOqIEdkgRm1W33pepbrs"},
+    "Embankment": {"lat": 51.5072554, "lon": -0.1221937, "placeId": "ChIJ85vnMskEdkgRizGhXNN3k6o"},
+    "Euston": {"lat": 51.5280408, "lon": -0.1333271, "placeId": "ChIJNVch-SMbdkgRqv1PBlyKQqU"},
+    "Euston Square": {"lat": 51.525635, "lon": -0.1350197, "placeId": "ChIJdTDfAiYbdkgRDjpEjH8RSnI"},
+    "Farringdon": {"lat": 51.520338, "lon": -0.1054851, "placeId": "ChIJp7R9HVIbdkgRkHSxz54Qxjw"},
+    "Gloucester Road": {"lat": 51.4944048, "lon": -0.1827321, "placeId": "ChIJY2zjBF4FdkgRBITPvkNYBho"},
+    "Goodge Street": {"lat": 51.5206162, "lon": -0.134527, "placeId": "ChIJXS6NpS4bdkgR7_EhEFlacW8"},
+    "Great Portland Street": {"lat": 51.5237421, "lon": -0.1439184, "placeId": "ChIJkVboC9cadkgRYOzinfJX7Pw"},
+    "Green Park": {"lat": 51.5069327, "lon": -0.1428838, "placeId": "ChIJQRZgSygFdkgRrZelNQQCpf8"},
+    "High Street Kensington": {"lat": 51.5008834, "lon": -0.1926463, "placeId": "ChIJgR1T2_YPdkgRox0xsHKJEWQ"},
+    "Holborn": {"lat": 51.5174277, "lon": -0.1199958, "placeId": "ChIJr11YVTQbdkgRhY0V1HABqq8"},
+    "Hyde Park Corner": {"lat": 51.5030263, "lon": -0.1523499, "placeId": "ChIJP3ORNSUFdkgRH5WN6MNz4a8"},
+    "Kennington": {"lat": 51.4883004, "lon": -0.1056734, "placeId": "ChIJl55TqZAEdkgRCqQtpLZu6r0"},
+    "King's Cross St Pancras": {"lat": 51.5306628, "lon": -0.1231666, "placeId": "ChIJx4FA-TsbdkgR0KLHklorYXw"},
+    "Knightsbridge": {"lat": 51.5015326, "lon": -0.1605382, "placeId": "ChIJZ6O_CTkFdkgROFMJInuosD8"},
+    "Lambeth North": {"lat": 51.4989177, "lon": -0.1121086, "placeId": "ChIJvwo7q74EdkgRezYeI2NSMCs"},
+    "Lancaster Gate": {"lat": 51.5118099, "lon": -0.1753674, "placeId": "ChIJgZ_amk0FdkgRTyJanN2L1wM"},
+    "Leicester Square": {"lat": 51.511451, "lon": -0.128144, "placeId": "ChIJ98Dokc0EdkgRy3-ajwvdD94"},
+    "Liverpool Street": {"lat": 51.5174331, "lon": -0.0829667, "placeId": "ChIJJ1jodq0cdkgRj7HA-vwxEHs"},
+    "London Bridge": {"lat": 51.5058325, "lon": -0.0870885, "placeId": "ChIJYc1mdQADdkgR54U5sTM1psA"},
+    "Mansion House": {"lat": 51.5122905, "lon": -0.0936332, "placeId": "ChIJLw7CfqoEdkgRLl2SJ9DRW-8"},
+    "Marble Arch": {"lat": 51.5133753, "lon": -0.1582845, "placeId": "ChIJX_jXnjQFdkgRSPraYlz1cmQ"},
+    "Marylebone": {"lat": 51.5224432, "lon": -0.163173, "placeId": "ChIJdQ_yANcadkgRJvgBongmJZc"},
+    "Monument": {"lat": 51.5110023, "lon": -0.0866591, "placeId": "ChIJw6LfxVMDdkgR4vqI2PwF66w"},
+    "Moorgate": {"lat": 51.5185071, "lon": -0.0883927, "placeId": "ChIJq8uikascdkgR4TC3ScDRPDc"},
+    "Nine Elms": {"lat": 51.4800886, "lon": -0.1290947, "placeId": "ChIJxb9PmvAEdkgRcPtq-xeSQAQ"},
+    "Notting Hill Gate": {"lat": 51.5091207, "lon": -0.1963494, "placeId": "ChIJAZ58j_sPdkgRCy7yBmysnHA"},
+    "Old Street": {"lat": 51.5256641, "lon": -0.08753, "placeId": "ChIJzREMBKYcdkgRT9taU6biunM"},
+    "Oxford Circus": {"lat": 51.5152117, "lon": -0.1418553, "placeId": "ChIJe9DRTdUadkgRAlFpoUrfj0c"},
+    "Paddington (Bakerloo, Circle and District)": {"lat": 51.5160334, "lon": -0.1751595, "placeId": "ChIJpwBVsLIadkgRE767cq0HnXQ"},
+    "Paddington (Circle and Hammersmith & City)": {"lat": 51.5179649, "lon": -0.1774452, "placeId": "ChIJ08Axua0adkgRB_LT1Epx2P8"},
+    "Piccadilly Circus": {"lat": 51.510121, "lon": -0.1341683, "placeId": "ChIJvVRe4NMEdkgRw3WgQO_J9KM"},
+    "Pimlico": {"lat": 51.4893224, "lon": -0.1333867, "placeId": "ChIJuWi7o-YEdkgRuUKA7QR2BYU"},
+    "Queensway": {"lat": 51.5104995, "lon": -0.1871865, "placeId": "ChIJoQGb71UFdkgR80plpHYwwRc"},
+    "Regent's Park": {"lat": 51.5235971, "lon": -0.1467184, "placeId": "ChIJqSNDLtcadkgR-uG7QjdJuN0"},
+    "Russell Square": {"lat": 51.5230788, "lon": -0.1242635, "placeId": "ChIJc1H-2DAbdkgREGJoCFlabM8"},
+    "Sloane Square": {"lat": 51.4923519, "lon": -0.1564328, "placeId": "ChIJX4cORhYFdkgRdaAZPP16Y8w"},
+    "South Kensington": {"lat": 51.4941558, "lon": -0.1739576, "placeId": "ChIJ91cwg0IFdkgR18p5WmlWiTY"},
+    "Southwark": {"lat": 51.503926, "lon": -0.1049685, "placeId": "ChIJGfGBUKUEdkgRSTEeQf5Ux-U"},
+    "St James's Park": {"lat": 51.499479, "lon": -0.1337107, "placeId": "ChIJjb5P89sEdkgR6gnY-YukPug"},
+    "St Paul's": {"lat": 51.5148917, "lon": -0.0975492, "placeId": "ChIJY4RoLasEdkgR5J8vMW-DN1g"},
+    "Temple": {"lat": 51.5109998, "lon": -0.1142932, "placeId": "ChIJgwqKNbQEdkgRCSsg7ZTLjzM"},
+    "Tottenham Court Road": {"lat": 51.5162811, "lon": -0.1300406, "placeId": "ChIJUwzMay0bdkgR2il_ihMRcME"},
+    "Tower Hill": {"lat": 51.5101178, "lon": -0.0766609, "placeId": "ChIJYRsYAUwDdkgRWD9yGC0gqek"},
+    "Vauxhall": {"lat": 51.4859811, "lon": -0.1239279, "placeId": "ChIJ8YCOY-4EdkgR1BkL52PYoQg"},
+    "Victoria": {"lat": 51.495665, "lon": -0.1437301, "placeId": "ChIJG-B_VyAFdkgRfdNeAeE6_ww"},
+    "Warren Street": {"lat": 51.5246192, "lon": -0.1381671, "placeId": "ChIJj-hXfCgbdkgRWewwuunWzdg"},
+    "Waterloo": {"lat": 51.5030796, "lon": -0.1151239, "placeId": "ChIJF4o0NLgEdkgRjBPR6vZ4dsg"},
+    "Westminster": {"lat": 51.501343, "lon": -0.1248413, "placeId": "ChIJ0160ScQEdkgR3zgV673t8yU"}
   }));
+  const PADDINGTON_NAMES = {
+    "940GZZLUPAC": "Paddington (Bakerloo, Circle and District)",
+    "940GZZLUPAH": "Paddington (Circle and Hammersmith & City)"
+  };
   const current = (l) => !l.closed && (l.opened || 0) <= 2026;
   try {
     const [sj, lj] = await Promise.all(["tfl_stations.json", "tfl_lines.json"].map((f) => fetch(SRC + f).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })));
@@ -431,9 +436,12 @@ details > *:not(summary) { margin-top: 8px; }
       if (!tl.length || !zone.split("/").includes("1")) continue;
       let name = p.name.split("St. ").join("St ");
       if (name === "Edgware Road") name = tl.length === 1 && tl[0] === "Bakerloo" ? "Edgware Road (Bakerloo)" : "Edgware Road (Circle/District/H&C)";
-      const [lon, lat] = f.geometry.coordinates;
+      const paddingtonName = PADDINGTON_NAMES[p.id];
+      if (paddingtonName) name = paddingtonName;
+      const [tflLon, tflLat] = f.geometry.coordinates;
+      const { lat = tflLat, lon = tflLon, placeId } = STATION_PINS.get(name) ?? {};
       if (picked.has(name)) { const s0 = picked.get(name); tl.forEach((l) => { if (!s0.l.includes(l)) s0.l.push(l); }); continue; }
-      picked.set(name, { n: name, z: zone, l: tl, lat, lon });
+      picked.set(name, { n: name, z: zone, l: tl, lat, lon, placeId, legacyName: paddingtonName ? p.name : null });
     }
     const st = [...picked.values()].sort((a, b) => (a.n < b.n ? -1 : a.n > b.n ? 1 : 0));
     const bbox = [Math.min(...st.map((s) => s.lat)) - 0.03, Math.min(...st.map((s) => s.lon)) - 0.045, Math.max(...st.map((s) => s.lat)) + 0.03, Math.max(...st.map((s) => s.lon)) + 0.045];
@@ -475,6 +483,8 @@ details > *:not(summary) { margin-top: 8px; }
   let state = { cons: [], boundary: true };
   try { const saved = JSON.parse(localStorage.getItem(STORE)); if (saved && Array.isArray(saved.cons)) state = { boundary: true, ...saved }; } catch (e) {}
   const save = () => { try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (e) {} };
+  // A saved Paddington exclusion from before the split still covers both stops.
+  const stationRuleMatches = (c, s) => c.type === "station" && (c.name === s.n || (s.legacyName && c.name === s.legacyName));
   // askC: where the seekers are asking from, shared by the Match, Measure and Tentacles tabs.
   const draft = { radarC: null, radarM: 1000, ta: null, tb: null, pts: [], askC: null };
   let pick = null; // 'radar' | 'ta' | 'tb' | 'draw' | 'ask'
@@ -483,7 +493,7 @@ details > *:not(summary) { margin-top: 8px; }
   // ---------- map ----------
   const [b0, b1, b2, b3] = D.bbox;
   const map = L.map("map", { preferCanvas: true, zoomControl: false, minZoom: 11, maxZoom: 18, maxBounds: [[b0 - 0.05, b1 - 0.08], [b2 + 0.05, b3 + 0.08]], attributionControl: true });
-  map.attributionControl.setPrefix(false).addAttribution("Stations &amp; lines: TfL open data via Oliver O'Brien");
+  map.attributionControl.setPrefix(false).addAttribution("Network &amp; fare zones: TfL open data via Oliver O'Brien").addAttribution("Station coordinates: Google Places");
   L.control.zoom({ position: "topright" }).addTo(map);
   const tiles = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
@@ -666,7 +676,7 @@ details > *:not(summary) { margin-top: 8px; }
     for (const s of stations) {
       s.why = null;
       if (!state.boundary && s.z !== "1") { s.rem = []; s.frac = 0; s.why = "Zone 1/2 hidden"; continue; }
-      if (manual.has(s.n)) { s.rem = []; s.frac = 0; s.why = "Ruled out by hand"; continue; }
+      if (manual.has(s.n) || (s.legacyName && manual.has(s.legacyName))) { s.rem = []; s.frac = 0; s.why = "Ruled out by hand"; continue; }
       const f = filters.find((c) => !QTYPES[c.type].filter(c, s));
       if (f) { s.rem = []; s.frac = 0; s.why = `Ruled out: ${describe(f).t}`; continue; }
       let m = [[s.ring]];
@@ -774,9 +784,9 @@ details > *:not(summary) { margin-top: 8px; }
 
   function onStationTap(s) {
     if (pick) { setPoint([s.lat, s.lon]); return; }
-    const manual = state.cons.find((c) => c.on && c.type === "station" && c.name === s.n);
+    const manual = state.cons.find((c) => c.on && stationRuleMatches(c, s));
     const status = s.frac > 0 ? `${Math.round(s.frac * 100)}% of its zone still possible` : (s.why || "Eliminated");
-    const placeId = GOOGLE_PLACE_IDS.get(s.n);
+    const placeId = s.placeId;
     const mapsUrl = placeId && `https://www.google.com/maps/search/?${new URLSearchParams({ api: "1", query: `${s.n} Underground station, London`, query_place_id: placeId })}`;
     const html = `<div class="pop"><h3>${esc(s.n)}</h3><div class="sub">Zone ${esc(s.z)} · ${esc(s.l.join(", "))}<br>${esc(status)}</div>
       <div class="acts">
@@ -795,7 +805,7 @@ details > *:not(summary) { margin-top: 8px; }
       if (act === "ta") { draft.ta = [s.lat, s.lon]; showTab("thermo"); }
       if (act === "tb") { draft.tb = [s.lat, s.lon]; showTab("thermo"); }
       if (act === "out") add({ type: "station", name: s.n, ans: "out" });
-      if (act === "restore") { state.cons = state.cons.filter((c) => !(c.type === "station" && c.name === s.n)); render(); }
+      if (act === "restore") { state.cons = state.cons.filter((c) => !stationRuleMatches(c, s)); render(); }
       drawDraft(); syncPanels();
     }));
   }
@@ -933,12 +943,12 @@ details > *:not(summary) { margin-top: 8px; }
     if (!list.length) { ul.innerHTML = `<li class="empty">No station matches “${esc(q)}”.</li>`; return; }
     for (const s of list) {
       const on = s.frac > 0;
-      const manual = state.cons.some((c) => c.on && c.type === "station" && c.name === s.n);
+      const manual = state.cons.some((c) => c.on && stationRuleMatches(c, s));
       const li = document.createElement("li");
       if (!on) li.className = "off-text";
       li.innerHTML = `<span class="dot ${on ? "" : "off"}"></span><div class="grow"><div class="name">${esc(s.n)}</div><div class="sub">${on ? `${Math.round(s.frac * 100)}% of zone possible` : esc(s.why || "Eliminated")} · ${esc(s.l.join(", "))}</div></div>`;
       const btn = document.createElement("button"); btn.type = "button";
-      if (manual) { btn.textContent = "Restore"; btn.onclick = () => { state.cons = state.cons.filter((c) => !(c.type === "station" && c.name === s.n)); render(); }; }
+      if (manual) { btn.textContent = "Restore"; btn.onclick = () => { state.cons = state.cons.filter((c) => !stationRuleMatches(c, s)); render(); }; }
       else { btn.textContent = "Rule out"; btn.disabled = !on; btn.onclick = () => add({ type: "station", name: s.n, ans: "out" }); }
       li.querySelector(".grow").onclick = () => { map.setView([s.lat, s.lon], Math.max(map.getZoom(), 15)); };
       li.appendChild(btn); ul.appendChild(li);
