@@ -114,6 +114,7 @@ details > *:not(summary) { margin-top: 8px; }
 /* ===== end css: game-settings ===== */
 
 /* ===== feature css: match-line ===== */
+#ml-line { flex: 1; }
 /* ===== end css: match-line ===== */
 
 /* ===== feature css: match-name ===== */
@@ -816,6 +817,318 @@ details > *:not(summary) { margin-top: 8px; }
   // ===== end: game-settings =====
 
   // ===== feature: match-line =====
+  // Matching: "Is your nearest transit line the same as mine?"
+  // Uses only the Tube track polylines already loaded (D.lines: TfL open data via Oliver O'Brien, attributed above), so no extra data file.
+  // How: on a 20 m grid covering every possible hiding zone, store each line's distance minus the nearest line's distance.
+  // "Where line L is nearest" is then traced from that field with marching squares (linear interpolation along grid edges),
+  // simplified, and cached per line. Everything here is in a block so its names can't clash with other features.
+  {
+    const ML_TOL = 5;    // metres: lines within this of the nearest one count as tied (shared or side-by-side track)
+    const ML_SLACK = 3;  // metres of extra give so grid and simplification error never rules out a tied spot
+    const ML_CELL = 20, ML_BLOCK = 8, ML_CAP = 80, ML_Q = ML_CAP / 250, ML_REACH = 805, ML_SIMP = 1.5;
+    const mlNames = [...new Set(D.lines.map((l) => l.l))].sort((a, b) => a.localeCompare(b));
+    const mlIdx = Object.fromEntries(mlNames.map((n, i) => [n, i]));
+    const NL = mlNames.length;
+    const segA = [], segL = [];
+    D.lines.forEach((l) => {
+      const p = l.c.map(([a, b]) => proj(a, b)), li = mlIdx[l.l];
+      if (p.length === 1) { segA.push(p[0][0], p[0][1], p[0][0], p[0][1]); segL.push(li); }
+      for (let i = 1; i < p.length; i++) { segA.push(p[i - 1][0], p[i - 1][1], p[i][0], p[i][1]); segL.push(li); }
+    });
+    const SG = Float64Array.from(segA), SL = Uint8Array.from(segL), NS = SL.length;
+    const sd = (px, py, k) => {
+      const o = 4 * k, ax = SG[o], ay = SG[o + 1], dx = SG[o + 2] - ax, dy = SG[o + 3] - ay, L2 = dx * dx + dy * dy;
+      let t = L2 ? ((px - ax) * dx + (py - ay) * dy) / L2 : 0; t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const ex = px - ax - t * dx, ey = py - ay - t * dy; return Math.sqrt(ex * ex + ey * ey);
+    };
+    // Straight-line distance from [lat, lng] to each line's nearest track, nearest first.
+    const mlRank = (ll) => {
+      const [px, py] = proj(ll[0], ll[1]), d = new Array(NL).fill(Infinity);
+      for (let k = 0; k < NS; k++) { const v = sd(px, py, k); if (v < d[SL[k]]) d[SL[k]] = v; }
+      return mlNames.map((l, i) => ({ l, d: d[i] })).sort((a, b) => a.d - b.d || a.l.localeCompare(b.l));
+    };
+    const zoneR = (s) => Math.hypot(s.ring[0][0] - s.xy[0], s.ring[0][1] - s.xy[1]);
+
+    // The field. E[k * NL + line] = (that line's distance − nearest line's distance) / ML_Q, capped at ML_CAP.
+    // Only grid points within ML_REACH (the largest zone radius) + 3 cells of a station are filled; mask marks them.
+    // Each 8×8 block of points only checks the segments that could be within ML_CAP of its nearest one (kept in cands,
+    // valid a grid step beyond the block, so contour points on and in its cells can be found exactly later).
+    let mlF = null;
+    const mlField = () => {
+      if (mlF) return mlF;
+      const C = ML_CELL, R = Math.max(ML_REACH, ...stations.map(zoneR)) + 3 * C, R2 = R * R;
+      const xs = stations.map((s) => s.xy[0]), ys = stations.map((s) => s.xy[1]);
+      const x0 = Math.min(...xs) - R - C, y0 = Math.min(...ys) - R - C;
+      const nx = Math.ceil((Math.max(...xs) + R + C - x0) / C) + 1, ny = Math.ceil((Math.max(...ys) + R + C - y0) / C) + 1, N = nx * ny;
+      const mask = new Uint8Array(N), E = new Uint8Array(N * NL);
+      for (const s of stations) {
+        const [sx, sy] = s.xy, i0 = Math.max(0, Math.floor((sx - R - x0) / C)), i1 = Math.min(nx - 1, Math.ceil((sx + R - x0) / C));
+        const j0 = Math.max(0, Math.floor((sy - R - y0) / C)), j1 = Math.min(ny - 1, Math.ceil((sy + R - y0) / C));
+        for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) { const dx = x0 + i * C - sx, dy = y0 + j * C - sy; if (dx * dx + dy * dy <= R2) mask[j * nx + i] = 1; }
+      }
+      const B = ML_BLOCK, hd = (B + 2) * C * Math.SQRT1_2, dc = new Float64Array(NS), cand = new Int32Array(NS), dl = new Float64Array(NL);
+      const nbx = Math.ceil(nx / B), nby = Math.ceil(ny / B), bc = new Int32Array(nbx * nby + 1), cands = [];
+      for (let bj = 0; bj < nby; bj++) for (let bi = 0; bi < nbx; bi++) {
+        const iA = bi * B, jA = bj * B, iB = Math.min(nx, iA + B), jB = Math.min(ny, jA + B);
+        let any = false;
+        bc[bj * nbx + bi + 1] = cands.length;
+        for (let j = jA; j < jB && !any; j++) for (let i = iA; i < iB; i++) if (mask[j * nx + i]) { any = true; break; }
+        if (!any) continue;
+        const cx = x0 + (iA + (B - 1) / 2) * C, cy = y0 + (jA + (B - 1) / 2) * C;
+        let m = Infinity;
+        for (let k = 0; k < NS; k++) { const v = sd(cx, cy, k); dc[k] = v; if (v < m) m = v; }
+        const lim = m + 2 * hd + ML_CAP; let nc = 0;
+        for (let k = 0; k < NS; k++) if (dc[k] <= lim) { cand[nc++] = k; cands.push(k); }
+        bc[bj * nbx + bi + 1] = cands.length;
+        for (let j = jA; j < jB; j++) for (let i = iA; i < iB; i++) {
+          const k = j * nx + i; if (!mask[k]) continue;
+          const px = x0 + i * C, py = y0 + j * C;
+          dl.fill(Infinity);
+          for (let q = 0; q < nc; q++) { const s = cand[q], v = sd(px, py, s); if (v < dl[SL[s]]) dl[SL[s]] = v; }
+          let dmin = Infinity; for (let l = 0; l < NL; l++) if (dl[l] < dmin) dmin = dl[l];
+          for (let l = 0; l < NL; l++) { const e = dl[l] - dmin; E[k * NL + l] = e >= ML_CAP ? 250 : Math.round(e / ML_Q); }
+        }
+      }
+      return (mlF = { C, x0, y0, nx, ny, N, mask, E, B, nbx, bc, cands: Int32Array.from(cands) });
+    };
+
+    // Douglas–Peucker for a closed ring (first point == last point).
+    const mlSimplify = (r, tol) => {
+      if (r.length < 5) return r;
+      const keep = new Uint8Array(r.length); keep[0] = keep[r.length - 1] = 1;
+      // split at the point farthest from the start so neither half is degenerate
+      let far = 1, fd = -1; for (let i = 1; i < r.length - 1; i++) { const d = Math.hypot(r[i][0] - r[0][0], r[i][1] - r[0][1]); if (d > fd) { fd = d; far = i; } }
+      keep[far] = 1;
+      const stack = [[0, far], [far, r.length - 1]];
+      while (stack.length) {
+        const [a, b] = stack.pop(); let mi = -1, md = tol;
+        for (let i = a + 1; i < b; i++) { const d = segDist(r[i], r[a], r[b]); if (d > md) { md = d; mi = i; } }
+        if (mi >= 0) { keep[mi] = 1; stack.push([a, mi], [mi, b]); }
+      }
+      return r.filter((p, i) => keep[i]);
+    };
+
+    // Region where f = (line li's distance − nearest other line's distance) <= level, as a projected multipolygon.
+    const mlRegions = new Map();
+    const mlRegion = (li, level) => {
+      const key = li + "|" + level;
+      if (mlRegions.has(key)) return mlRegions.get(key);
+      const { C, x0, y0, nx, ny, N, mask, E, B, nbx, bc, cands } = mlField();
+      const g = new Float32Array(N);
+      for (let k = 0; k < N; k++) {
+        if (!mask[k]) { g[k] = -ML_CAP; continue; }
+        const b = k * NL; let eo = 250;
+        for (let l = 0; l < NL; l++) if (l !== li && E[b + l] < eo) eo = E[b + l];
+        g[k] = level - (E[b + li] - eo) * ML_Q;
+      }
+      // Marching squares. Edge ids: horizontal edge from point k to k+1 is k; vertical edge from k to k+nx is N+k.
+      const A1 = new Int32Array(2 * N).fill(-1), A2 = new Int32Array(2 * N).fill(-1);
+      const link = (p, q) => { if (A1[p] < 0) A1[p] = q; else A2[p] = q; if (A1[q] < 0) A1[q] = p; else A2[q] = p; };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const k = j * nx + i, ga = g[k], gb = g[k + 1], gc = g[k + nx + 1], gd = g[k + nx];
+        const cs = (ga > 0 ? 1 : 0) | (gb > 0 ? 2 : 0) | (gc > 0 ? 4 : 0) | (gd > 0 ? 8 : 0);
+        if (cs === 0 || cs === 15) continue;
+        const e0 = k, e1 = N + k + 1, e2 = k + nx, e3 = N + k, mid = ga + gb + gc + gd > 0;
+        switch (cs) {
+          case 1: case 14: link(e3, e0); break;
+          case 2: case 13: link(e0, e1); break;
+          case 3: case 12: link(e3, e1); break;
+          case 4: case 11: link(e1, e2); break;
+          case 6: case 9: link(e0, e2); break;
+          case 7: case 8: link(e2, e3); break;
+          case 5: if (mid) { link(e0, e1); link(e2, e3); } else { link(e3, e0); link(e1, e2); } break;
+          case 10: if (mid) { link(e3, e0); link(e1, e2); } else { link(e0, e1); link(e2, e3); } break;
+        }
+      }
+      // Exact level − f at a point, using the candidate segments of grid block bk.
+      const gAt = (px, py, bk) => {
+        let dL = Infinity, dO = Infinity;
+        for (let q = bc[bk], qe = bc[bk + 1]; q < qe; q++) { const s = cands[q], v = sd(px, py, s); if (SL[s] === li) { if (v < dL) dL = v; } else if (v < dO) dO = v; }
+        const f = dL - dO; return level - (f > ML_CAP ? ML_CAP : f < -ML_CAP ? -ML_CAP : f);
+      };
+      // Where the contour crosses an edge: found by bisection on the exact distances (linear interpolation of the grid
+      // misplaces it near kinks, e.g. where shared track splits); plain interpolation at the outer edge of the grid.
+      const pt = (id) => {
+        const v = id >= N, k = v ? id - N : id, k2 = v ? k + nx : k + 1, j = (k / nx) | 0, i = k - j * nx;
+        const ax = x0 + i * C, ay = y0 + j * C, dx = v ? 0 : C, dy = v ? C : 0;
+        let t;
+        if (mask[k] && mask[k2]) {
+          const bk = ((j / B) | 0) * nbx + ((i / B) | 0), inA = g[k] > 0;
+          let lo = 0, hi = 1;
+          for (let n = 0; n < 9; n++) { const m = (lo + hi) / 2; if ((gAt(ax + m * dx, ay + m * dy, bk) > 0) === inA) lo = m; else hi = m; }
+          t = (lo + hi) / 2;
+        } else t = g[k] / (g[k] - g[k2]);
+        t = t < 0.001 ? 0.001 : t > 0.999 ? 0.999 : t;
+        return [ax + t * dx, ay + t * dy];
+      };
+      // A straight chord across a cell can cut a corner off the true boundary (where a track ends or bends, say).
+      // Check the chord's midpoint against the exact distances and add a vertex where the boundary really is.
+      const refine = (p, q, ci, cj, depth, out) => {
+        const mx = (p[0] + q[0]) / 2, my = (p[1] + q[1]) / 2, ex = q[0] - p[0], ey = q[1] - p[1], len = Math.hypot(ex, ey);
+        if (len < 2) return;
+        const ux = -ey / len, uy = ex / len, bk = ((cj / B) | 0) * nbx + ((ci / B) | 0);
+        const bx0 = x0 + ci * C, by0 = y0 + cj * C, bx1 = bx0 + C, by1 = by0 + C;
+        // furthest we can go from the midpoint along ±(ux, uy) and stay in the cell
+        const reach = (sx, sy) => Math.min(sx > 0 ? (bx1 - mx) / sx : sx < 0 ? (bx0 - mx) / sx : Infinity, sy > 0 ? (by1 - my) / sy : sy < 0 ? (by0 - my) / sy : Infinity);
+        const inM = gAt(mx, my, bk) > 0;
+        let best = null;
+        for (const sg of [1, -1]) {
+          const h = reach(sg * ux, sg * uy); if (!(h > 0.25)) continue;
+          if ((gAt(mx + sg * ux * h, my + sg * uy * h, bk) > 0) === inM) continue;
+          let lo = 0, hi = h;
+          for (let n = 0; n < 9; n++) { const m = (lo + hi) / 2; if ((gAt(mx + sg * ux * m, my + sg * uy * m, bk) > 0) === inM) lo = m; else hi = m; }
+          const t = (lo + hi) / 2; if (!best || t < best.t) best = { t, sg };
+        }
+        if (!best || best.t < 0.25) return;
+        const c = [mx + best.sg * ux * best.t, my + best.sg * uy * best.t];
+        if (depth > 0) refine(p, c, ci, cj, depth - 1, out);
+        out.push(c);
+        if (depth > 0) refine(c, q, ci, cj, depth - 1, out);
+      };
+      // Cell (i, j) shared by edges a and b, if both lie inside the filled area and it isn't a saddle cell.
+      const cellOf = (a, b) => {
+        const ka = a >= N ? a - N : a, kb = b >= N ? b - N : b, cand = [ka, ka - 1, ka - nx];
+        for (const k of cand) {
+          if (k < 0) continue;
+          const es = [k, N + k + 1, k + nx, N + k];
+          if (!es.includes(a) || !es.includes(b)) continue;
+          if (!mask[k] || !mask[k + 1] || !mask[k + nx] || !mask[k + nx + 1]) return null;
+          const cs = (g[k] > 0 ? 1 : 0) | (g[k + 1] > 0 ? 2 : 0) | (g[k + nx + 1] > 0 ? 4 : 0) | (g[k + nx] > 0 ? 8 : 0);
+          if (cs === 5 || cs === 10) return null;
+          const j = (k / nx) | 0; return [k - j * nx, j];
+        }
+        return null;
+      };
+      const seen = new Uint8Array(2 * N), polys = [];
+      for (let s = 0; s < 2 * N; s++) {
+        if (A1[s] < 0 || seen[s]) continue;
+        const ids = []; let cur = s;
+        while (cur >= 0 && !seen[cur]) {
+          seen[cur] = 1; ids.push(cur);
+          const a = A1[cur], b = A2[cur]; cur = a >= 0 && !seen[a] ? a : b >= 0 && !seen[b] ? b : -1;
+        }
+        if (ids.length < 3) continue;
+        const pts = ids.map(pt), ring = [];
+        for (let n = 0; n < ids.length; n++) {
+          const n2 = (n + 1) % ids.length, cell = cellOf(ids[n], ids[n2]);
+          ring.push(pts[n]);
+          if (cell) refine(pts[n], pts[n2], cell[0], cell[1], 2, ring);
+        }
+        ring.push(ring[0].slice());
+        const r = mlSimplify(ring, ML_SIMP);
+        if (r.length >= 4) polys.push([r]);
+      }
+      // Rings never cross, so XOR of all of them gives islands with their holes.
+      let out = [];
+      try { out = polys.length ? pc.xor(...polys) : []; } catch (e) { console.warn("match-line: region failed", e); out = null; }
+      if (out) mlRegions.set(key, out);
+      return out;
+    };
+    const mlLevel = (ans) => (ans === "yes" ? 1 : -1) * (ML_TOL + ML_SLACK);
+    const mlKeep = (line, ans) => (mlIdx[line] === undefined ? null : mlRegion(mlIdx[line], mlLevel(ans)));
+
+    // Edges of a region that fall inside a hiding zone, as [lat, lng] polylines (for outlines).
+    const mlEdges = (m) => {
+      const zs = stations.map((s) => [s.xy[0], s.xy[1], zoneR(s) ** 2]);
+      const inZ = ([x, y]) => zs.some(([sx, sy, r2]) => (x - sx) * (x - sx) + (y - sy) * (y - sy) <= r2);
+      const out = [];
+      for (const poly of m) for (const ring of poly) {
+        const ins = ring.map(inZ); let cur = [];
+        for (let i = 0; i < ring.length; i++) {
+          if (ins[i] || (i > 0 && ins[i - 1]) || (i < ring.length - 1 && ins[i + 1])) cur.push(unproj(ring[i][0], ring[i][1]));
+          else { if (cur.length > 1) out.push(cur); cur = []; }
+        }
+        if (cur.length > 1) out.push(cur);
+      }
+      return out;
+    };
+    const mlEdgeCache = new WeakMap();
+    const mlEdgesCached = (m) => {
+      const sig = stations.map(zoneR).join(",");
+      const hit = mlEdgeCache.get(m);
+      if (hit && hit.sig === sig) return hit.e;
+      const e = mlEdges(m); mlEdgeCache.set(m, { sig, e }); return e;
+    };
+    const lineName = (l) => `${l} line`;
+
+    QTYPES["match-line"] = {
+      region: (c) => mlKeep(c.line, c.ans),
+      keeps: (c) => c.ans === "yes",
+      describe: (c) => ({ t: `Nearest line: ${lineName(c.line)}${c.c ? `, from ${placeName(c.c)}` : ""}`, a: c.ans === "yes" ? "Same line" : "Different line", ok: c.ans === "yes" }),
+      outline: (c, st, layer) => {
+        const m = mlKeep(c.line, c.ans); if (!m) return;
+        mlEdgesCached(m).forEach((p) => L.polyline(p, st).addTo(layer));
+      },
+      _test: { mlRank, mlField, mlRegion, mlKeep, mlNames, ML_TOL, ML_SLACK, sd, NS, SL },
+    };
+
+    // ---- Match tab UI ----
+    const ml = { at: undefined, rank: null, line: "", manual: false };
+    const body = addSubject("match", "line", "Transit line");
+    body.innerHTML = `
+      <p class="hint" id="ml-near">Set where you are asking from to find your nearest line.</p>
+      <div class="row"><label for="ml-line">Your line</label><select id="ml-line"></select></div>
+      <div class="answers"><button type="button" class="yes" id="ml-yes" disabled>Yes, same line</button><button type="button" class="no" id="ml-no" disabled>No, different</button></div>
+      <p class="hint" id="ml-shade"></p>
+      <p class="hint">Nearest means the closest Tube track in a straight line, underground sections included, not the lines at the nearest station. Tube lines only. Where lines share track (like the Circle and District) they count as tied: Yes keeps those spots and No doesn't rule them out.</p>`;
+    const sel = body.querySelector("#ml-line");
+    const fillSelect = () => {
+      const opts = ml.rank ? ml.rank.map((r) => `<option value="${esc(r.l)}">${esc(r.l)} · ${esc(fmtD(r.d))}</option>`)
+        : [`<option value="">Choose a line</option>`, ...mlNames.map((l) => `<option value="${esc(l)}">${esc(l)}</option>`)];
+      sel.innerHTML = opts.join("");
+      sel.value = ml.line;
+    };
+    sel.addEventListener("change", () => { ml.line = sel.value; ml.manual = true; drawDraft(); syncPanels(); });
+    hooks.sync.push(() => {
+      if (draft.askC !== ml.at) {
+        ml.at = draft.askC; ml.rank = ml.at ? mlRank(ml.at) : null;
+        const was = ml.line;
+        ml.manual = false; ml.line = ml.rank ? ml.rank[0].l : "";
+        fillSelect();
+        if (ml.line !== was) drawDraft(); // setPoint draws before it syncs, so redraw for the new line
+      }
+      const near = body.querySelector("#ml-near");
+      if (ml.rank) {
+        const d0 = ml.rank[0].d, tied = ml.rank.filter((r) => r.d <= d0 + ML_TOL).map((r) => r.l);
+        near.textContent = tied.length > 1
+          ? `The ${tied.slice(0, -1).join(", ")} and ${tied[tied.length - 1]} lines are tied as your nearest (${fmtD(d0)} away). Pick the one you named.`
+          : `Your nearest line is the ${lineName(tied[0])}, ${fmtD(d0)} away.`;
+      } else near.textContent = "Set where you are asking from to find your nearest line, or choose it below.";
+      body.querySelector("#ml-yes").disabled = body.querySelector("#ml-no").disabled = !ml.line;
+      body.querySelector("#ml-shade").textContent = ml.line ? `Shaded: where the ${lineName(ml.line)} is the nearest track, within the hiding zones.` : "";
+    });
+    const mlAnswer = (ans) => {
+      if (!ml.line) return;
+      const r = ml.rank && ml.rank.find((x) => x.l === ml.line);
+      add({ type: "match-line", line: ml.line, c: draft.askC ? draft.askC.slice() : null, d: r ? Math.round(r.d) : null, ans });
+      drawDraft(); syncPanels();
+    };
+    body.querySelector("#ml-yes").onclick = () => mlAnswer("yes");
+    body.querySelector("#ml-no").onclick = () => mlAnswer("no");
+
+    // Preview: the chosen line's track, and (once the field is ready) where it's the nearest line inside the hiding zones.
+    let mlZones = null, mlZoneSig = "", mlPending = false;
+    const mlShade = new Map();
+    const mlShadeFor = (line) => {
+      const sig = stations.map(zoneR).join(",");
+      if (sig !== mlZoneSig) { mlZoneSig = sig; mlZones = pc.union(...stations.map((s) => [s.ring])); mlShade.clear(); }
+      if (!mlShade.has(line)) { const m = mlKeep(line, "yes"); mlShade.set(line, m ? toLL(pc.intersection(m, mlZones)) : []); }
+      return mlShade.get(line);
+    };
+    hooks.draft.push((tab, layer) => {
+      if (!subjectOn("match", "line") || !ml.line) return;
+      const col = "#" + (D.colors[ml.line] || "1d3f94");
+      if (mlShade.has(ml.line) && mlZoneSig === stations.map(zoneR).join(",")) {
+        L.polygon(mlShadeFor(ml.line), { pane: "cons", color: col, weight: 1, opacity: 0.7, fillColor: col, fillOpacity: 0.18, interactive: false }).addTo(layer);
+      } else if (!mlPending) {
+        // Building the field takes a moment the first time, so do it after this frame and redraw.
+        mlPending = true;
+        setTimeout(() => { try { mlShadeFor(ml.line); } catch (e) { console.warn("match-line: preview failed", e); mlShade.set(ml.line, []); } mlPending = false; if (subjectOn("match", "line")) drawDraft(); }, 30);
+      }
+      D.lines.filter((l) => l.l === ml.line).forEach((l) => L.polyline(l.c, { pane: "cons", color: "#ffffff", weight: 12, opacity: 0.9, interactive: false }).addTo(layer));
+      D.lines.filter((l) => l.l === ml.line).forEach((l) => L.polyline(l.c, { pane: "cons", color: col, weight: 6, opacity: 1, interactive: false }).addTo(layer));
+    });
+  }
   // ===== end: match-line =====
 
   // ===== feature: match-name =====
