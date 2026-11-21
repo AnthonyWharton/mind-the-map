@@ -92,11 +92,12 @@ button.danger { color: var(--no); }
 details summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
 details > *:not(summary) { margin-top: 8px; }
 .empty { color: var(--muted); font-size: 14px; padding: 6px 0; }
-/* Station labels: only once zoomed in enough to read them */
+/* Station labels: on by default at every zoom (smaller when zoomed out); the layers menu turns them off. */
 .leaflet-tooltip.stn { background: rgba(255,255,255,.88); border: 0; box-shadow: none; padding: 0 4px; font: 600 11px var(--font-body); color: var(--ink); border-radius: 4px; display: none; }
 .leaflet-tooltip.stn::before { display: none; }
 .leaflet-tooltip.stn.gone { color: #8a8f99; }
-.labels .leaflet-tooltip.stn { display: block; }
+.leaflet-container:not(.no-names) .leaflet-tooltip.stn { display: block; }
+.leaflet-container:not(.labels) .leaflet-tooltip.stn { font-size: 9px; padding: 0 2px; }
 .locate { width: 34px; height: 34px; padding: 0; display: grid; place-items: center; background: #fff; color: var(--accent); border: 2px solid rgba(0,0,0,.2); border-radius: 4px; background-clip: padding-box; }
 #banner #b-gps { background: #2a7de1; color: #fff; border: 0; }
 .ptlabel { background: var(--accent); color: #fff; font: 700 12px var(--font-display); width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
@@ -106,11 +107,18 @@ details > *:not(summary) { margin-top: 8px; }
 .pop .acts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .pop .acts button { padding: 7px 8px; font-size: 13px; }
 .leaflet-container { font-family: var(--font-body); }
-/* Credits: one line on small screens, tap to read them all. */
-@media (max-width: 640px) {
-  .leaflet-control-attribution { max-width: calc(100vw - 20px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
-  .leaflet-control-attribution.open { white-space: normal; }
-}
+/* Credits: a small "© OSM" tag in the corner; tap it to read them all (tap again to close). */
+.leaflet-container .leaflet-control-attribution { cursor: pointer; }
+.leaflet-container .leaflet-control-attribution:not(.open) { font-size: 0; padding: 0 5px; line-height: 16px; border-top-left-radius: 6px; background: rgba(255,255,255,.75); }
+.leaflet-container .leaflet-control-attribution:not(.open)::before { content: "© OSM ⓘ"; font-size: 10px; color: #333; }
+.leaflet-container .leaflet-control-attribution.open { max-width: min(420px, calc(100vw - 20px)); white-space: normal; font-size: 11px; line-height: 1.4; padding: 4px 8px; background: rgba(255,255,255,.95); border-top-left-radius: 6px; }
+/* Line key (from the layers menu) */
+.line-key { background: rgba(255,255,255,.94); border-radius: 6px; box-shadow: 0 1px 5px rgba(0,0,0,.25); padding: 6px 8px; font: 12px/1.35 var(--font-body); color: var(--ink); max-height: 50vh; overflow: auto; }
+.line-key b { display: block; font-size: 12px; margin-bottom: 2px; }
+.line-key div { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.line-key i { display: inline-block; width: 18px; height: 5px; border-radius: 2px; flex: none; }
+.leaflet-control-layers-overlays label { font-size: 13px; }
+
 .pop .maps-link { display: inline-block; margin-top: 8px; }
 .chips.subj button.on { background: var(--accent); border-color: var(--accent); }
 .subj-body { display: flex; flex-direction: column; gap: 10px; }
@@ -209,6 +217,11 @@ details > *:not(summary) { margin-top: 8px; }
           <button type="button" data-m="1000" class="on">1 km</button>
           <button type="button" data-m="2000">2 km</button>
           <button type="button" data-m="5000">5 km</button>
+          <button type="button" data-m="10000">10 km</button>
+          <button type="button" data-m="15000">15 km</button>
+          <button type="button" data-m="40000">40 km</button>
+          <button type="button" data-m="80000">80 km</button>
+          <button type="button" data-m="160000">160 km</button>
         </div>
         <div class="row"><label for="r-custom">Other</label><input id="r-custom" type="number" inputmode="decimal" min="0" step="any" placeholder="1.5"><span class="hint">km</span><input id="r-unit" type="hidden" value="1000"></div>
         <div class="answers"><button type="button" class="yes" id="r-yes" disabled>Yes, within</button><button type="button" class="no" id="r-no" disabled>No, outside</button></div>
@@ -495,7 +508,28 @@ details > *:not(summary) { margin-top: 8px; }
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
   }).addTo(map);
   const simple = L.layerGroup();
-  L.control.layers({ "Street map": tiles, "Simple map (Thames and lines)": simple }, null, { position: "topright" }).addTo(map);
+  // Layers menu overlays: station names (on or off) and a key to the Tube line colours.
+  // Both are empty layer groups used as switches, so the choice sticks per device (localStorage, best effort).
+  const names = L.layerGroup(), key = L.layerGroup();
+  const prefGet = (k, d) => { try { const v = localStorage.getItem("mtm-" + k); return v === null ? d : v === "1"; } catch (e) { return d; } };
+  const prefSet = (k, v) => { try { localStorage.setItem("mtm-" + k, v ? "1" : "0"); } catch (e) {} };
+  const lineKey = L.control({ position: "bottomleft" });
+  lineKey.onAdd = () => {
+    const div = L.DomUtil.create("div", "line-key");
+    div.innerHTML = "<b>Tube lines</b>" + Object.keys(D.colors).filter((l) => D.lines.some((x) => x.l === l))
+      .map((l) => `<div><i style="background:#${D.colors[l]}${l === "Northern" ? ";outline:1px solid #888" : ""}"></i>${esc(l)}</div>`).join("");
+    L.DomEvent.disableClickPropagation(div); L.DomEvent.disableScrollPropagation(div);
+    div.addEventListener("click", () => map.removeLayer(key)); // tap the key to hide it
+    return div;
+  };
+  map.on("overlayadd overlayremove", (e) => {
+    const on = e.type === "overlayadd";
+    if (e.layer === names) { map.getContainer().classList.toggle("no-names", !on); prefSet("names", on); }
+    if (e.layer === key) { if (on) lineKey.addTo(map); else lineKey.remove(); prefSet("key", on); }
+  });
+  L.control.layers({ "Street map": tiles, "Simple map (Thames and lines)": simple }, { "Station names": names, "Tube line key": key }, { position: "topright" }).addTo(map);
+  if (prefGet("names", true)) names.addTo(map); else map.getContainer().classList.add("no-names");
+  if (prefGet("key", false)) key.addTo(map);
   const panes = { base: 300, lines: 380, mask: 400, zones: 410, cons: 420, stns: 450, draft: 460, gps: 470 };
   for (const [n, z] of Object.entries(panes)) { map.createPane(n).style.zIndex = z; }
   const stBounds = L.latLngBounds(stations.map((s) => [s.lat, s.lon]));
@@ -2064,9 +2098,9 @@ details > *:not(summary) { margin-top: 8px; }
   // has letters u Tube, r National Rail, o Overground, e Elizabeth line, d DLR.
   {
     const MS_T = "measure-station", MS_MIN = 25, MS_N = 48;
-    const MS_SETS = { rail: "All rail stations", tube: "Tube stations" };
+    const MS_SETS = { national: "National Rail", rail: "All rail", tube: "Tube" };
     const MS_FAR = [[boxRing(9e5, 9e5, 9e5 + 10, 9e5 + 10)]]; // a speck far away: "no station near any zone"
-    let msData = null, msFail = false, msSet = "rail";
+    let msData = null, msFail = false, msSet = "national";
     const msPtCache = {};
     map.attributionControl.addAttribution("Rail stations: &copy; OpenStreetMap contributors (ODbL)");
     const msNorm = (n) => n.toLowerCase().replace(/^london /, "").replace(/\bst\.? /g, "st ").replace(/&/g, "and").replace(/\(.*?\)/g, "").replace(/[^a-z0-9]+/g, " ").trim();
@@ -2074,9 +2108,11 @@ details > *:not(summary) { margin-top: 8px; }
     function msPoints(set) {
       if (!msData) return null;
       if (msPtCache[set]) return msPtCache[set];
-      const pts = stations.map((s) => ({ n: s.n, lat: s.lat, lon: s.lon, xy: s.xy, m: "u", placeId: s.placeId }));
+      // National Rail: only stations with National Rail services (mainline termini and through stations), not the app's Tube stations.
+      const pts = set === "national" ? [] : stations.map((s) => ({ n: s.n, lat: s.lat, lon: s.lon, xy: s.xy, m: "u", placeId: s.placeId }));
       for (const [n, lat, lon, m] of msData.stations) {
         if (set === "tube" && !m.includes("u")) continue;
+        if (set === "national" && !m.includes("r")) continue;
         const xy = proj(lat, lon), k = msNorm(n);
         const dup = stations.some((s) => { const dd = Math.hypot(s.xy[0] - xy[0], s.xy[1] - xy[1]); return dd < 100 || (dd < 400 && m === "u" && msNorm(s.n) === k); });
         if (!dup) pts.push({ n, lat, lon, xy, m });
@@ -2109,7 +2145,7 @@ details > *:not(summary) { margin-top: 8px; }
     QTYPES[MS_T] = {
       region(c) { return c.d > 0 || c.ans === "closer" ? msBuffer(c.set, msRadius(c)) : MS_FAR; },
       keeps: (c) => c.ans === "closer",
-      describe: (c) => ({ t: `Measure ${c.set === "tube" ? "Tube" : "rail"} station: seekers ${fmtD(c.d)} from ${c.near}`, a: c.ans === "closer" ? "Closer" : "Further", ok: c.ans === "closer" }),
+      describe: (c) => ({ t: `Measure ${c.set === "tube" ? "Tube" : c.set === "national" ? "National Rail" : "rail"} station: seekers ${fmtD(c.d)} from ${c.near}`, a: c.ans === "closer" ? "Closer" : "Further", ok: c.ans === "closer" }),
       outline(c, st, layer) { const g = regionFor(c); if (g && g !== MS_FAR) L.polygon(toLL(g), st).addTo(layer); },
       points: msPoints,
     };
@@ -2133,7 +2169,7 @@ details > *:not(summary) { margin-top: 8px; }
 
     hooks.sync.push(() => {
       el.querySelectorAll(".ms-sets button").forEach((b) => b.classList.toggle("on", b.dataset.set === msSet));
-      q(".ms-set-hint").textContent = msSet === "rail" ? "Counts Tube, National Rail, Overground, Elizabeth line and DLR stations, including ones just outside Zone 1. Distances are to each station's map point." : "Counts Tube stations only, including ones just outside Zone 1. Distances are to each station's map point.";
+      q(".ms-set-hint").textContent = msSet === "national" ? "Counts National Rail stations only (mainline stations like Waterloo, Euston, London Bridge, Farringdon and Blackfriars), including ones just outside Zone 1. Tube-only, Overground-only, Elizabeth line-only and DLR stations don't count. Distances are to each station's map point." : msSet === "rail" ? "Counts Tube, National Rail, Overground, Elizabeth line and DLR stations, including ones just outside Zone 1. Distances are to each station's map point." : "Counts Tube stations only, including ones just outside Zone 1. Distances are to each station's map point.";
       q(".ms-retry").hidden = !msFail;
       const n = draft.askC && msNearest(draft.askC, msSet);
       const info = q(".ms-info");
@@ -2213,12 +2249,13 @@ details > *:not(summary) { margin-top: 8px; }
     aquarium: { one: "aquarium", many: "aquariums", tent: 15, note: "Distances are to the aquarium’s centre point." },
     golf: { one: "golf course", many: "golf courses", note: "Full courses only: not pitch and putt, driving ranges or mini golf. Distances are to the edge of the course." },
     museum: { one: "museum", many: "museums", tent: 1, note: "Includes the big public art galleries, like the National Gallery and Tate Britain. Distances are to the centre point." },
-    cinema: { one: "cinema", many: "cinemas", tent: 1, note: "Distances are to the cinema’s centre point." },
+    cinema: { one: "cinema", label: "Cinema (movie theater)", many: "cinemas", tent: 1, note: "Distances are to the cinema’s centre point." },
     hospital: { one: "hospital", many: "hospitals", tent: 1, note: "Named hospitals, NHS and private. Distances are to the hospital’s centre point." },
     library: { one: "library", many: "libraries", tent: 1, note: "Libraries open to the public: not university, school or members-only ones. Distances are to the centre point." },
     consulate: { one: "consulate", many: "consulates", note: "Embassies and high commissions count too, because in London they do the consular work (their trade or defence offices don’t). Distances are to the centre point." },
   };
-  const POI_ORDER = { match: ["park", "theme", "zoo", "aquarium", "golf", "museum", "cinema", "hospital", "library", "consulate"], tentacles: ["museum", "library", "cinema", "hospital", "zoo", "aquarium", "theme"] };
+  const POI_ORDER = { match: ["park", "zoo", "museum", "cinema", "hospital", "library", "consulate"], // the game's question sheet (no amusement parks, aquariums or golf)
+    tentacles: ["museum", "library", "cinema", "hospital", "zoo", "aquarium", "theme"] };
   POI_ORDER.measure = POI_ORDER.match;
   const POI_TABS = ["match", "measure"]; // small game: no Tentacles (the tentacle code below is kept but has no tab)
   const poiCap = (s) => s[0].toUpperCase() + s.slice(1);
@@ -2569,7 +2606,7 @@ details > *:not(summary) { margin-top: 8px; }
     const sig = cats.join();
     if (u.sig !== sig) {
       u.sig = sig;
-      el.querySelector(".poi-cat").innerHTML = cats.map((k) => `<option value="${k}">${esc(poiCap(POI_CATS[k].one))}${tab === "tentacles" ? ` (${POI_CATS[k].tent} mi)` : ""}</option>`).join("");
+      el.querySelector(".poi-cat").innerHTML = cats.map((k) => `<option value="${k}">${esc(POI_CATS[k].label || poiCap(POI_CATS[k].one))}${tab === "tentacles" ? ` (${POI_CATS[k].tent} mi)` : ""}</option>`).join("");
     }
     el.querySelector(".poi-off").hidden = !!cats.length;
     el.querySelector(".poi-on").hidden = !cats.length;
