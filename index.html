@@ -2855,7 +2855,7 @@ details > *:not(summary) { margin-top: 8px; }
   //              consular work in London), or the older amenity=embassy; not residences, EU-style delegations, or
   //              embassy offices that don't serve the public (trade, defence, cultural, education sections)
   //   aquarium   tourism=aquarium
-  //   park       leisure=park, at least 0.5 ha, outline kept; a named garden inside a bigger park is dropped
+  //   park       named public leisure=park/common/garden (and public nature reserves, park-like recreation grounds), at least 0.1 ha, outline kept; one inside a bigger park is dropped (see data/poi-build/build.js)
   //   golf       leisure=golf_course, at least 2 ha, outline kept; not driving ranges, pitch and putt, footgolf
   //              or mini golf
   //   zoo        tourism=zoo, at least 0.3 ha if mapped as an area, outline kept; not petting zoos, city farms,
@@ -3060,6 +3060,14 @@ details > *:not(summary) { margin-top: 8px; }
   // Buffers are unions of convex pieces (circles, and rectangles along outlines) plus the areas themselves. Only the
   // hiding zones matter, so the work is done per 1 km tile around the stations, where convex clipping is cheap and
   // a tile wholly inside one piece is simply full.
+  // Convex hull (monotone chain) of points, as a closed ring.
+  function poiHull(pts) {
+    const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]), cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const lo = [], up = [];
+    for (const q of p) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop(); lo.push(q); }
+    for (let i = p.length - 1; i >= 0; i--) { const q = p[i]; while (up.length >= 2 && cr(up[up.length - 2], up[up.length - 1], q) <= 0) up.pop(); up.push(q); }
+    const h = lo.slice(0, -1).concat(up.slice(0, -1)); h.push(h[0].slice()); return h;
+  }
   function poiBuffer(places, r, grow) {
     const n = 16, k = 1 / Math.cos(Math.PI / n), pieces = [], polys = [];
     const piece = (ring) => { const xs = ring.map((q) => q[0]), ys = ring.map((q) => q[1]); pieces.push({ ring, bb: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)] }); };
@@ -3069,6 +3077,39 @@ details > *:not(summary) { margin-top: 8px; }
       const tol = Math.max(8, Math.min(60, r / 10));
       const rr = grow ? (r + tol) * k : r - tol;
       if (!grow && rr <= 0) continue;
+      // Small parks (most of them) get one convex piece instead of a circle per corner, a box per edge and the outline:
+      // Closer, when the park is no wider than r: the hull of its corner circles (a slight over-estimate, as grow may be).
+      // Further, when it is under 60 m across: a circle of rr around its centre point, which lies inside the park, so
+      // the circle is within rr of the park and also covers it (an under-estimate by at most the park's width).
+      const span = Math.hypot(pl.bb[2] - pl.bb[0], pl.bb[3] - pl.bb[1]);
+      if (grow && span <= r) {
+        const pts = [];
+        pl.polys.forEach((p) => poiSimplify(p[0], tol).forEach(([x, y]) => { for (let q = 0; q < n; q++) { const a = 2 * Math.PI * q / n; pts.push([x + rr * Math.cos(a), y + rr * Math.sin(a)]); } }));
+        piece(poiHull(pts)); continue;
+      }
+      if (!grow && span <= 60 && span <= rr * Math.cos(Math.PI / 48) && pointInMulti(pl.xy, pl.polys)) { piece(circleRing(pl.xy[0], pl.xy[1], rr, 48)); continue; }
+      // Further, for a nearly convex park up to 400 m across: its hull grown by rr − h, where every point of the hull
+      // is within h of the park (h ≤ 25 m), so the piece stays inside the true area. h doesn't depend on r: cached.
+      if (!grow && span <= 400) {
+        if (pl._h === undefined) {
+          const hull = poiHull(pl.polys.flatMap((p) => p[0])), st = Math.max(4, span / 20);
+          let h = 0;
+          // Sample the hull's edges and a grid inside it; a grid point stands for its cell, so add half the cell diagonal.
+          for (let i = 1; i < hull.length && h <= 25; i++) {
+            const [ax, ay] = hull[i - 1], [bx, by] = hull[i], m = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / st));
+            for (let j = 0; j < m; j++) h = Math.max(h, poiDist(pl, [ax + (bx - ax) * j / m, ay + (by - ay) * j / m]) + st / 2);
+          }
+          for (let x = pl.bb[0] + st / 2; x < pl.bb[2] && h <= 25; x += st) for (let y = pl.bb[1] + st / 2; y < pl.bb[3] && h <= 25; y += st)
+            if (pointInRing([x, y], hull)) h = Math.max(h, poiDist(pl, [x, y]) + st * 0.71);
+          pl._hull = hull; pl._h = h;
+        }
+        const g = rr * Math.cos(Math.PI / n) - pl._h - 1;
+        if (pl._h <= 25 && g > 5) {
+          const pts = [];
+          pl._hull.slice(0, -1).forEach(([x, y]) => { for (let q = 0; q < n; q++) { const a = 2 * Math.PI * q / n; pts.push([x + g * Math.cos(a), y + g * Math.sin(a)]); } });
+          piece(poiHull(pts)); continue;
+        }
+      }
       polys.push(...pl.polys);
       if (rr > 0) pl.polys.forEach((p) => p.forEach((ring) => {
         const line = poiSimplify(ring, tol);
