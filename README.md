@@ -1,17 +1,15 @@
 # Mind the Map
 
-A phone map for playing Jet Lag-style hide and seek in London Zone 1.
+A phone map for playing Jet Lag-style hide and seek in London Zone 1, as a small game measured in kilometres.
 
-It shows every Zone 1 tube station with its hiding zone, and gives seekers tools to rule areas out:
+It shows every Zone 1 tube station with its 500 m hiding zone, and gives seekers tools to rule areas out:
 
-- **Radar**: "are you within X of me?" from your GPS position or any point
-- **Thermometer**: hotter or colder after moving from A to B, with progress against the official distances
+- **Radar**: "are you within X of me?" (0.5, 1, 2 or 5 km, or any distance) from your GPS position or any point
+- **Thermometer**: hotter or colder after moving from A to B, with progress towards 1 km and 5 km
 - **Match**: "is your nearest ___ the same as mine?" for transit line, station name length, river side (north/south), borough, ward and places (museums, libraries, cinemas, hospitals, parks, embassies and more)
 - **Measure**: "are you closer to or further from ___ than me?" for the Thames (optionally lakes, canals and docks), rail stations, the river and borough borders, and the same places
-- **Tentacles**: "of all the ___ within a mile of me, which are you nearest to?" for museums, libraries, cinemas and hospitals (plus zoos, aquariums and theme parks in large games)
 - **Draw**: outline any area and say whether the hider is inside or outside it (for photos and anything else)
 - **Stations**: rule individual stations out by hand, and open any station in Google Maps
-- **Game**: game size, hiding zone radius (official ¼ or ½ mile, or 500 m), a hiding timer and the question costs
 
 Everything ruled out is shaded grey, the header counts the stations left, and every answer can be switched off, deleted or undone. Answers are saved in the browser, and a game code lets teammates share the same map.
 
