@@ -80,6 +80,8 @@ ul.list li { display: flex; align-items: center; gap: 10px; padding: 8px 0; bord
 ul.list li:last-child { border-bottom: 0; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--zone); flex: none; }
 .dot.off { background: #b9bcc4; }
+.dot.part { background: linear-gradient(90deg, var(--zone) 50%, #8f95a0 50%); }
+.dot.near { background: linear-gradient(90deg, #b9bcc4 50%, #ffffff 50%); box-shadow: inset 0 0 0 1.5px #80858f; }
 .grow { flex: 1; min-width: 0; }
 .name { font-weight: 600; }
 .sub { color: var(--muted); font-size: 13px; }
@@ -97,6 +99,8 @@ details > *:not(summary) { margin-top: 8px; }
 .leaflet-tooltip.stn { background: rgba(255,255,255,.88); border: 0; box-shadow: none; padding: 0 4px; font: 600 11px var(--font-body); color: var(--ink); border-radius: 4px; display: none; }
 .leaflet-tooltip.stn::before { display: none; }
 .leaflet-tooltip.stn.gone { color: #8a8f99; }
+.leaflet-tooltip.stn.gone.near { color: #5b6272; font-style: italic; }
+.edge-mode .hint { display: block; font-size: 11px; line-height: 1.3; margin: 2px 0 0; max-width: 190px; }
 .names-auto.labels .leaflet-tooltip.stn, .names-on .leaflet-tooltip.stn { display: block; }
 .names-on:not(.labels) .leaflet-tooltip.stn { font-size: 9px; padding: 0 2px; }
 .names-mode { padding: 2px 0; }
@@ -551,7 +555,25 @@ details > *:not(summary) { margin-top: 8px; }
     sec.querySelector(`input[value="${m}"]`).checked = true; setNames(m);
     sec.addEventListener("change", (e) => setNames(e.target.value));
   }
-  const panes = { base: 300, lines: 380, mask: 400, zones: 410, cons: 420, stns: 450, draft: 460, gps: 470 };
+  // Border stations (display only: never stored in the game state or game codes, just a per-device preference).
+  // Half grey: still possible, but part of the zone is ruled out. Faded half: ruled out, but by less than the margin.
+  const edge = { on: prefGet("edges", "0") === "1", m: [50, 100, 200].includes(+prefGet("edge-m", "100")) ? +prefGet("edge-m", "100") : 100 };
+  {
+    const list = layersCtl.getContainer().querySelector(".leaflet-control-layers-list"), sec = document.createElement("div");
+    sec.className = "names-mode edge-mode";
+    sec.innerHTML = `<span>Border stations</span>` + [["0", "Off"], ["1", "On"]].map(([v, t]) => `<label><input type="radio" name="edge-on" value="${v}"> ${t}</label>`).join("")
+      + `<span>Only-just margin</span>` + [50, 100, 200].map((v) => `<label><input type="radio" name="edge-m" value="${v}"> ${v} m</label>`).join("")
+      + `<span class="hint">Half grey: possible, but partly ruled out. Faded half: ruled out by less than the margin.</span>`;
+    list.append(Object.assign(document.createElement("div"), { className: "leaflet-control-layers-separator" }), sec);
+    sec.querySelector(`input[name="edge-on"][value="${edge.on ? "1" : "0"}"]`).checked = true;
+    sec.querySelector(`input[name="edge-m"][value="${edge.m}"]`).checked = true;
+    sec.addEventListener("change", (e) => {
+      if (e.target.name === "edge-on") { edge.on = e.target.value === "1"; prefSet("edges", e.target.value); }
+      if (e.target.name === "edge-m") { edge.m = +e.target.value; prefSet("edge-m", e.target.value); }
+      render();
+    });
+  }
+  const panes = { base: 300, lines: 380, mask: 400, zones: 410, cons: 420, stns: 450, stnsHalf: 455, draft: 460, gps: 470 };
   for (const [n, z] of Object.entries(panes)) { map.createPane(n).style.zIndex = z; }
   const stBounds = L.latLngBounds(stations.map((s) => [s.lat, s.lon]));
   map.fitBounds(stBounds, { padding: [10, 10] });
@@ -584,6 +606,12 @@ details > *:not(summary) { margin-top: 8px; }
       .addTo(map);
     s.marker.on("click", () => onStationTap(s));
   });
+  // Half-filled glyphs drawn over border stations' markers (not interactive, so taps still reach the marker below).
+  const halfLayer = L.layerGroup().addTo(map);
+  const halfIcons = {
+    part: L.divIcon({ className: "", iconSize: [15, 15], iconAnchor: [7.5, 7.5], html: '<svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true"><circle cx="7.5" cy="7.5" r="5.5" fill="#ffffff"/><path d="M7.5 2a5.5 5.5 0 0 1 0 11z" fill="#8f95a0"/><circle cx="7.5" cy="7.5" r="5.5" fill="none" stroke="#1b1f2b" stroke-width="2"/></svg>' }),
+    near: L.divIcon({ className: "", iconSize: [13, 13], iconAnchor: [6.5, 6.5], html: '<svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.75" fill="#c3c6cd"/><path d="M6.5 1.75a4.75 4.75 0 0 1 0 9.5z" fill="#ffffff"/><circle cx="6.5" cy="6.5" r="4.75" fill="none" stroke="#5b6272" stroke-width="1.5"/></svg>' }),
+  };
   const syncLabels = () => map.getContainer().classList.toggle("labels", map.getZoom() >= 13);
   map.on("zoomend", syncLabels); syncLabels();
 
@@ -725,10 +753,11 @@ details > *:not(summary) { margin-top: 8px; }
     // Each region is split into polygons with bounding boxes, so a zone is only clipped against the parts near it.
     const bbOf = (ring) => { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const [x, y] of ring) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; } return [x0, y0, x1, y1]; };
     const asMulti = (g) => !g.length ? [] : typeof g[0][0][0] === "number" ? [g] : g;
-    const regions = active.filter((c) => c.type !== "station" && !filters.includes(c)).map((c) => ({ g: regionFor(c), keep: keepsInside(c) })).filter((r) => r.g)
-      .map((r) => ({ keep: r.keep, polys: asMulti(r.g).filter((p) => p.length && p[0].length).map((p) => ({ p, b: bbOf(p[0]) })) }));
+    // wide: built-in radar/thermometer/drawn-area geometry, which isn't limited to the hiding zones (see computeNear).
+    const regions = active.filter((c) => c.type !== "station" && !filters.includes(c)).map((c) => ({ g: regionFor(c), keep: keepsInside(c), wide: !QTYPES[c.type] })).filter((r) => r.g)
+      .map((r) => ({ keep: r.keep, wide: r.wide, polys: asMulti(r.g).filter((p) => p.length && p[0].length).map((p) => ({ p, b: bbOf(p[0]) })) }));
     for (const s of stations) {
-      s.why = null;
+      s.why = null; s.near = false;
       if (!state.boundary && s.z !== "1") { s.rem = []; s.frac = 0; s.why = "Zone 1/2 hidden"; continue; }
       if (manual.has(s.n) || (s.legacyName && manual.has(s.legacyName))) { s.rem = []; s.frac = 0; s.why = "Ruled out by hand"; continue; }
       const f = filters.find((c) => !QTYPES[c.type].filter(c, s));
@@ -744,6 +773,63 @@ details > *:not(summary) { margin-top: 8px; }
       const a = m.length ? multiArea(m) : 0;
       if (a < 1) { s.rem = []; s.frac = 0; s.why = "Eliminated"; } else { s.rem = m; s.frac = a / s.base; }
     }
+    for (const s of stations) s.part = edge.on && s.frac > 0 && s.frac < 0.99;
+    if (edge.on) computeNear(regions, bbOf);
+  }
+
+  // "Only just ruled out": a station ruled out by its answers (not by hand, by a station-level question or the Zone 1/2
+  // switch) where some spot in its zone is within edge.m metres of every answer's allowed area. Display only.
+  // Each answer's allowed area is clipped to the zone widened by the margin for built-in radar, thermometer and drawn
+  // areas, whose geometry reaches beyond the zones. Other question types may only be built inside the zones, so they're
+  // clipped to the zone itself: that can miss a near miss across the zone edge but never invents one.
+  // Spots are tested on a 20 m grid.
+  function computeNear(regions, bbOf) {
+    const M = edge.m, M2 = M * M, G = 20;
+    const withinM = (px, py, k) => {
+      const b = k.b; if (px < b[0] - M || px > b[2] + M || py < b[1] - M || py > b[3] + M) return false;
+      const sg = k.segs; let inside = false;
+      for (let i = 0; i < sg.length; i += 4) {
+        const ay = sg[i + 1], by = sg[i + 3];
+        if ((ay > py) !== (by > py) && px < (sg[i + 2] - sg[i]) * (py - ay) / (by - ay) + sg[i]) inside = !inside;
+      }
+      if (inside) return true;
+      for (let i = 0; i < sg.length; i += 4) {
+        const ax = sg[i], ay = sg[i + 1], dx = sg[i + 2] - ax, dy = sg[i + 3] - ay, l2 = dx * dx + dy * dy;
+        const t = l2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0;
+        const ex = ax + t * dx - px, ey = ay + t * dy - py;
+        if (ex * ex + ey * ey <= M2) return true;
+      }
+      return false;
+    };
+    for (const s of stations) {
+      if (s.why !== "Eliminated") continue;
+      const [cx, cy] = s.xy, R = Math.hypot(s.ring[0][0] - cx, s.ring[0][1] - cy);
+      const wideRing = circleRing(cx, cy, R + M + 5, 64);
+      const pieces = []; let ok = true;
+      for (const r of regions) {
+        const zone = r.wide ? wideRing : s.ring, zb = bbOf(zone);
+        const near = r.polys.filter(({ b }) => b[0] <= zb[2] && b[2] >= zb[0] && b[1] <= zb[3] && b[3] >= zb[1]).map(({ p }) => p);
+        let k;
+        if (!near.length) k = r.keep ? [] : [[zone]];
+        else { try { k = r.keep ? pc.intersection([[zone]], near) : pc.difference([[zone]], near); } catch (e) { ok = false; break; } }
+        if (!k.length) { ok = false; break; }
+        const segs = []; let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (const poly of k) for (const ring of poly) for (let i = 0; i < ring.length - 1; i++) {
+          const [ax, ay] = ring[i], [bx, by] = ring[i + 1];
+          segs.push(ax, ay, bx, by);
+          if (ax < x0) x0 = ax; if (ax > x1) x1 = ax; if (ay < y0) y0 = ay; if (ay > y1) y1 = ay;
+        }
+        if (x0 > cx + R + M || x1 < cx - R - M || y0 > cy + R + M || y1 < cy - R - M) { ok = false; break; }
+        pieces.push({ segs, b: [x0, y0, x1, y1], area: multiArea(k) });
+      }
+      if (!ok || !pieces.length) continue;
+      pieces.sort((a, b) => a.area - b.area); // the smallest allowed area rejects most spots, so test it first
+      search: for (let gx = -R; gx <= R; gx += G) for (let gy = -R; gy <= R; gy += G) {
+        if (gx * gx + gy * gy > R * R) continue;
+        const px = cx + gx, py = cy + gy;
+        if (pieces.every((k) => withinM(px, py, k))) { s.near = true; break search; }
+      }
+    }
   }
 
   function render() {
@@ -752,7 +838,8 @@ details > *:not(summary) { margin-top: 8px; }
     // count pill
     const pill = $("#count");
     const total = stations.filter((s) => state.boundary || s.z === "1").length;
-    pill.textContent = alive.length === 0 ? "None left: check log" : `${alive.length} of ${total} left`;
+    const nNear = stations.filter((s) => s.near).length;
+    pill.textContent = (alive.length === 0 ? "None left: check log" : `${alive.length} of ${total} left`) + (nNear ? ` · ${nNear} just out` : "");
     pill.className = "pill" + (alive.length === 0 ? " none" : alive.length <= 5 ? " few" : "");
     // remaining zones + mask
     zoneLayer.clearLayers(); maskLayer.clearLayers();
@@ -771,11 +858,13 @@ details > *:not(summary) { margin-top: 8px; }
       L.polygon(toLL(mask), { pane: "mask", stroke: false, fillColor: "#2a2f3a", fillOpacity: 0.38, interactive: false }).addTo(maskLayer);
     }
     // station markers
+    halfLayer.clearLayers();
     stations.forEach((s) => {
       const on = s.frac > 0;
       s.marker.setStyle({ fillColor: on ? "#ffffff" : "#c3c6cd", color: on ? "#1b1f2b" : "#80858f", radius: on ? 5.5 : 4 });
-      const tt = s.marker.getTooltip(); if (tt && tt.getElement()) tt.getElement().classList.toggle("gone", !on);
-      s.outline.setStyle({ opacity: on ? 0.25 : 0.12 });
+      const tt = s.marker.getTooltip(); if (tt && tt.getElement()) { tt.getElement().classList.toggle("gone", !on); tt.getElement().classList.toggle("near", !!s.near); }
+      s.outline.setStyle(s.near ? { color: "#d6006f", weight: 1.2, opacity: 0.7, dashArray: "4 4" } : { color: "#1b1f2b", weight: 0.6, opacity: on ? 0.25 : 0.12, dashArray: null });
+      if (s.part || s.near) L.marker([s.lat, s.lon], { pane: "stnsHalf", icon: halfIcons[s.part ? "part" : "near"], interactive: false, keyboard: false }).addTo(halfLayer);
     });
     // constraint outlines
     consLayer.clearLayers();
@@ -842,7 +931,7 @@ details > *:not(summary) { margin-top: 8px; }
   function onStationTap(s) {
     if (pick) { setPoint([s.lat, s.lon]); return; }
     const manual = state.cons.find((c) => c.on && stationRuleMatches(c, s));
-    const status = s.frac > 0 ? `${Math.round(s.frac * 100)}% of its zone still possible` : (s.why || "Eliminated");
+    const status = s.frac > 0 ? `${Math.round(s.frac * 100)}% of its zone still possible` : s.near ? `Only just ruled out: within ${edge.m} m` : (s.why || "Eliminated");
     const html = `<div class="pop"><h3>${esc(s.n)}</h3><div class="sub">Zone ${esc(s.z)} · ${esc(s.l.join(", "))}<br>${esc(status)}</div>
       <div class="acts">
         <button type="button" data-act="radar">Radar from here</button>
@@ -993,7 +1082,7 @@ details > *:not(summary) { margin-top: 8px; }
   $("#s-boundary").addEventListener("change", (e) => { state.boundary = e.target.checked; render(); });
   function renderStations() {
     const q = $("#s-q").value.trim().toLowerCase();
-    const list = stations.filter((s) => !q || s.n.toLowerCase().includes(q)).sort((a, b) => (b.frac > 0) - (a.frac > 0) || a.n.localeCompare(b.n));
+    const list = stations.filter((s) => !q || s.n.toLowerCase().includes(q)).sort((a, b) => (b.frac > 0) - (a.frac > 0) || (b.near ? 1 : 0) - (a.near ? 1 : 0) || a.n.localeCompare(b.n));
     const ul = $("#s-list"); ul.innerHTML = "";
     if (!list.length) { ul.innerHTML = `<li class="empty">No station matches “${esc(q)}”.</li>`; return; }
     for (const s of list) {
@@ -1001,7 +1090,7 @@ details > *:not(summary) { margin-top: 8px; }
       const manual = state.cons.some((c) => c.on && stationRuleMatches(c, s));
       const li = document.createElement("li");
       if (!on) li.className = "off-text";
-      li.innerHTML = `<span class="dot ${on ? "" : "off"}"></span><div class="grow"><div class="name">${esc(s.n)}</div><div class="sub">${on ? `${Math.round(s.frac * 100)}% of zone possible` : esc(s.why || "Eliminated")} · ${esc(s.l.join(", "))}</div></div>`;
+      li.innerHTML = `<span class="dot ${on ? (s.part ? "part" : "") : s.near ? "near" : "off"}"></span><div class="grow"><div class="name">${esc(s.n)}</div><div class="sub">${on ? `${Math.round(s.frac * 100)}% of zone possible` : s.near ? `Only just ruled out (within ${edge.m} m)` : esc(s.why || "Eliminated")} · ${esc(s.l.join(", "))}</div></div>`;
       const btn = document.createElement("button"); btn.type = "button";
       if (manual) { btn.textContent = "Restore"; btn.onclick = () => { state.cons = state.cons.filter((c) => !stationRuleMatches(c, s)); render(); }; }
       else { btn.textContent = "Rule out"; btn.disabled = !on; btn.onclick = () => add({ type: "station", name: s.n, ans: "out" }); }

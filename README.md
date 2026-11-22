@@ -27,6 +27,6 @@ Data for the newer questions is pre-built into `data/`:
 - `measure-sea-level.json`: ground height on a 25 m grid (lowest and highest point per cell) from AWS Terrain Tiles, which over London come from the Environment Agency's 2 m LIDAR composite DTM (Open Government Licence); `sea-level-build/` rebuilds it
 - `match-streets.json`: named streets and paths around the hiding zones from OpenStreetMap (ODbL); `street-build/` rebuilds it
 
-The layers menu (top right) sets station names to Auto (shown once zoomed in), On or Off, and shows a key to the Tube line colours. Map credits sit behind the small "© OSM" tag in the corner.
+The layers menu (top right) sets station names to Auto (shown once zoomed in), On or Off, and shows a key to the Tube line colours. Its Border stations switch (off by default) half-greys stations that are still possible but partly ruled out, and marks stations ruled out by less than a margin (50, 100 or 200 m) with a faded half dot and a dashed pink zone, in case GPS, station pins or a moving player put the hider just outside. It only changes the display: game codes and saved answers are unaffected. Map credits sit behind the small "© OSM" tag in the corner.
 
 Street map © OpenStreetMap contributors. Boundaries contain National Statistics and OS data © Crown copyright and database right.
