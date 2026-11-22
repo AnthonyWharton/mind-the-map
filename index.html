@@ -1051,9 +1051,10 @@ details > *:not(summary) { margin-top: 8px; }
   };
 
   // ===== feature: game-settings =====
-  // Small game, played in km: 500 m hiding zones (ZONE_R) and thermometers of 1 km and 5 km
-  // (the nearest round km to the official small-game ½ and 3 miles). The Thermo tab shows progress against them.
-  const THERMO_M = [1000, 5000];
+  // Small game, played in km: 500 m hiding zones (ZONE_R) and thermometers of 1 km, 3 km and 5 km
+  // (1 km and 5 km are the nearest round km to the official small-game ½ and 3 miles; 3 km is a house addition).
+  // The Thermo tab shows progress against each.
+  const THERMO_M = [1000, 3000, 5000];
   const thermoBox = document.createElement("div");
   thermoBox.className = "gs-thermo";
   $("#t-info").after(thermoBox);
