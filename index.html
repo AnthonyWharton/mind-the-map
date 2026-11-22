@@ -71,7 +71,7 @@ button.pt.set { background: var(--accent); color: #fff; border-color: var(--acce
 .chips button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
 input, select, textarea { font: inherit; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: #fff; color: var(--ink); min-width: 0; }
 input[type="number"] { width: 90px; }
-#d-note, #s-q { flex: 1; }
+#d-note, #s-q, .poi-q { flex: 1; }
 textarea { width: 100%; min-height: 64px; font-size: 13px; }
 label { color: var(--muted); font-size: 14px; }
 .check { display: flex; align-items: center; gap: 6px; }
@@ -575,6 +575,10 @@ details > *:not(summary) { margin-top: 8px; }
   }
   const panes = { base: 300, lines: 380, mask: 400, zones: 410, cons: 420, stns: 450, stnsHalf: 455, draft: 460, gps: 470 };
   for (const [n, z] of Object.entries(panes)) { map.createPane(n).style.zIndex = z; }
+  // Panes above the stations hold only non-interactive drawings, but a canvas there covers the whole map and would
+  // swallow taps meant for the station markers below (the GPS dot's canvas did, whenever GPS was on). Let taps fall
+  // through; interactive markers in them (the place pins) opt back in via .leaflet-interactive.
+  ["stnsHalf", "draft", "gps"].forEach((n) => { map.getPane(n).style.pointerEvents = "none"; });
   const stBounds = L.latLngBounds(stations.map((s) => [s.lat, s.lon]));
   map.fitBounds(stBounds, { padding: [10, 10] });
 
@@ -3310,7 +3314,7 @@ details > *:not(summary) { margin-top: 8px; }
     const cat = u.cat;
     if (!cat || !poiP || !draft.askC) return { cat };
     const key = cat + "|" + draft.askC.join(",");
-    if (u.key !== key) { u.key = key; u.pick = null; u.all = false; }
+    if (u.key !== key) { u.key = key; u.pick = null; u.all = false; u.q = ""; const qi = u.el && u.el.querySelector(".poi-q"); if (qi) qi.value = ""; }
     const p = proj(draft.askC[0], draft.askC[1]);
     const ranked = poiP[cat].map((pl) => ({ pl, d: poiDist(pl, p) })).sort((a, b) => a.d - b.d);
     if (!ranked.length) return { cat };
@@ -3320,6 +3324,17 @@ details > *:not(summary) { margin-top: 8px; }
       return { cat, p, ranked, cands, r, chosen: u.pick ? cands.find((x) => x.pl === u.pick) : null };
     }
     return { cat, p, ranked, chosen: (u.pick && ranked.find((x) => x.pl === u.pick)) || ranked[0] };
+  }
+  // Match/Measure list: the 4 nearest, or the POI_MORE nearest after "Show more", or name matches while searching;
+  // the chosen place is always included. Everything listed also gets a tappable pin on the map.
+  const POI_MORE = 40;
+  function poiShown(tab, s) {
+    const u = poiUI[tab];
+    if (!s.ranked) return [];
+    const q = (u.q || "").trim().toLowerCase();
+    let list = q ? s.ranked.filter((x) => x.pl.n.toLowerCase().includes(q)).slice(0, POI_MORE) : s.ranked.slice(0, u.all ? POI_MORE : 4);
+    if (s.chosen && !list.includes(s.chosen)) list = [...list, s.chosen];
+    return list;
   }
   function poiChoose(tab, pl) {
     const u = poiUI[tab];
@@ -3346,14 +3361,16 @@ details > *:not(summary) { margin-top: 8px; }
       <div class="poi-on">
         <div class="row"><label for="poi-cat-${tab}">Place</label><select id="poi-cat-${tab}" class="poi-cat"></select></div>
         <p class="hint poi-info"></p>
+        <div class="row poi-find"><input type="search" class="poi-q" id="poi-q-${tab}" placeholder="Find by name" aria-label="Find a place by name"></div>
         <div class="chips poi-list"></div>
         <div class="answers">${tab === "match" ? `<button type="button" class="yes">Same nearest</button><button type="button" class="no">Different</button>`
           : tab === "measure" ? `<button type="button" class="yes">Closer</button><button type="button" class="no">Further</button>`
           : `<button type="button" class="yes">Pick their answer</button><button type="button" class="no">Not within 1 mi</button>`}</div>
         <p class="hint poi-note"></p>
       </div>`;
-    const u = poiUI[tab] = { el, cat: poiCatsFor(tab)[0], pick: null, key: "", all: false, sig: "" };
+    const u = poiUI[tab] = { el, cat: poiCatsFor(tab)[0], pick: null, key: "", all: false, sig: "", q: "" };
     el.querySelector(".poi-cat").addEventListener("change", (e) => { u.cat = e.target.value; drawDraft(); syncPanels(); });
+    el.querySelector(".poi-q").addEventListener("input", (e) => { u.q = e.target.value; drawDraft(); syncPanels(); });
     el.querySelector(".poi-list").addEventListener("click", (e) => {
       const b = e.target.closest("button"); if (!b) return;
       if (b.dataset.all) { u.all = !u.all; syncPanels(); return; }
@@ -3377,7 +3394,7 @@ details > *:not(summary) { margin-top: 8px; }
     el.querySelector(".poi-cat").value = s.cat;
     const info = el.querySelector(".poi-info"), list = el.querySelector(".poi-list"), yes = el.querySelector(".yes"), no = el.querySelector(".no");
     el.querySelector(".poi-note").textContent = C.note + " From OpenStreetMap, so the odd one may be missing.";
-    yes.disabled = no.disabled = true; list.innerHTML = "";
+    yes.disabled = no.disabled = true; list.innerHTML = ""; el.querySelector(".poi-find").hidden = true;
     if (tab === "tentacles") no.textContent = `Not within ${C.tent} mi`;
     if (tab === "tentacles") yes.textContent = "Pick their answer";
     if (!poiP) { info.textContent = poiFailed ? "Place data didn’t load. Refresh to try again." : "Loading places…"; return; }
@@ -3385,6 +3402,7 @@ details > *:not(summary) { margin-top: 8px; }
     if (!s.ranked) { info.textContent = `No ${C.many} in the data.`; return; }
     const chip = (x) => `<button type="button" data-i="${s.ranked.indexOf(x)}" class="${s.chosen && x === s.chosen ? "on" : ""}">${esc(x.pl.n)} <span class="poi-d">${fmtD(x.d)}</span></button>`;
     if (tab === "tentacles") {
+      el.querySelector(".poi-find").hidden = true;
       const n = s.cands.length;
       no.disabled = false;
       if (!n) { info.textContent = `No ${C.many} within ${poiMi(s.r)} of you, so the hider can only say they’re not within ${C.tent} mi.`; return; }
@@ -3395,11 +3413,13 @@ details > *:not(summary) { margin-top: 8px; }
       yes.textContent = s.chosen ? `Nearest: ${s.chosen.pl.n}` : "Pick their answer";
       return;
     }
+    el.querySelector(".poi-find").hidden = false;
     const x = s.chosen;
     info.innerHTML = esc(`${s.chosen === s.ranked[0] ? "Your nearest" : "You picked"} ${C.one}: ${x.pl.n}, ${fmtDual(x.d)} away.${tab === "measure" ? ` Closer keeps everywhere within that distance of any ${C.one} (with 25 m leeway).` : ""} Not right? Tap the one you think is nearest.`) + " " + mapsLink(`${x.pl.n}, London`, x.pl.ll[0], x.pl.ll[1], null, `${x.pl.n} in Google Maps`);
-    const top = s.ranked.slice(0, 4);
-    if (!top.includes(x)) top.push(x);
-    list.innerHTML = top.map(chip).join("");
+    const q = (u.q || "").trim(), n = s.ranked.length;
+    const more = !q && n > 4 ? `<button type="button" data-all="1">${u.all ? "Show fewer" : `Show more (${Math.min(POI_MORE, n)} nearest)`}</button>` : "";
+    const none = q && !s.ranked.some((y) => y.pl.n.toLowerCase().includes(q.toLowerCase())) ? `<span class="hint">No ${esc(C.many)} called “${esc(q)}”.</span>` : "";
+    list.innerHTML = poiShown(tab, s).map(chip).join("") + more + none;
     yes.disabled = no.disabled = false;
   }
   const poiIcon = (cls, sz) => L.divIcon({ className: "", html: `<div class="poi-pin ${cls}"></div>`, iconSize: [sz, sz], iconAnchor: [sz / 2, sz / 2] });
@@ -3411,7 +3431,7 @@ details > *:not(summary) { margin-top: 8px; }
     const chosen = s.chosen && s.chosen.pl;
     if (s.r && draft.askC) L.circle(draft.askC, { pane: "draft", radius: s.r, color: "#6b3fa0", weight: 2, dashArray: "6 6", fill: false, interactive: false }).addTo(layer);
     // Areas (parks etc.) show their outlines; only the nearest few get a pin, or the map fills up with dots.
-    const pinned = poiP[s.cat].some((pl) => pl.polys) ? new Set(s.ranked ? (s.cands || s.ranked).slice(0, 12).map((x) => x.pl) : []) : null;
+    const pinned = poiP[s.cat].some((pl) => pl.polys) ? new Set(s.ranked ? [...(s.cands || s.ranked).slice(0, 12), ...(tab === "tentacles" ? [] : poiShown(tab, s))].map((x) => x.pl) : []) : null;
     for (const pl of poiP[s.cat]) {
       const on = !cand || cand.has(pl), sel = pl === chosen;
       if (pl.polys) L.polygon(toLL(pl.polys), { pane: "draft", color: "#6b3fa0", weight: sel ? 2.5 : 1, opacity: on ? 0.8 : 0.3, fillColor: "#6b3fa0", fillOpacity: sel ? 0.22 : on ? 0.08 : 0.03, interactive: false }).addTo(layer);
